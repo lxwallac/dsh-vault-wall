@@ -52,16 +52,6 @@ window.__ModuleLoader__.load({
     function browseReady() {
       return uiSvc() !== null
     }
-    /** 读取 scope 快照（readScopeSnap 供 useScope seat 缺席时的自订阅回退使用）。 */
-    function readScopeSnap(scope) {
-      try {
-        if (scope && typeof scope.getSnapshot === 'function') {
-          var s = scope.getSnapshot()
-          if (s && typeof s === 'object') return s
-        }
-      } catch (e) { /* 忽略快照读取异常 */ }
-      return { status: 'unavailable', value: undefined, revision: undefined, writable: false, mode: 'memory' }
-    }
 
     // ---- 设计 token（官方 alias，主题自适应明暗） ----
     var tok = {
@@ -575,24 +565,10 @@ window.__ModuleLoader__.load({
 
     // ===================== 页面：规则列表 =====================
     function VaultWallSection(props) {
-      // snap：优先用渲染器按 hooks.scope 绑定的 useScope seat；个别宿主没绑定时
-      // 退回自订阅 scope（getSnapshot/subscribe 契约，见 SettingsScopeController）。
-      var useScope = typeof props.useScope === 'function' ? props.useScope : null
+      // snap 直读渲染器按 hooks.scope 绑定的 useScope seat（每渲染调用一次，
+      // 不能包进其它 hook 初始化器，否则 Hook 顺序会错乱）。
       var scope = props.scope
-      var snapState = useState(function () {
-        if (useScope) return useScope(function (s) { return s })
-        return readScopeSnap(scope)
-      })
-      var snap = snapState[0]
-      var setSnap = snapState[1]
-      useEffect(function () {
-        if (useScope) return
-        if (!scope || typeof scope.subscribe !== 'function') return
-        var off = scope.subscribe(function () { setSnap(readScopeSnap(scope)) })
-        return function () { off() }
-      }, [])
-
-      var rawState = useState('')
+      var snap = props.useScope(function (s) { return s })
       var rawText = rawState[0]
       var setRawText = rawState[1]
       var adoptedState = useState('')

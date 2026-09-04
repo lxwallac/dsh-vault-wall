@@ -1,6 +1,6 @@
 {
   "name": "dsh-vault-wall",
-  "version": "0.2.26",
+  "version": "0.2.27",
   "description": "保险区 Vault Wall — 让 DeepSeek Harness 无法感知、无法触碰用户指定敏感路径的隔离墙插件（隔离墙 + 临时借出 + 触碰审计 + 紧急熔断）",
   "license": "MIT",
   "type": "module",
