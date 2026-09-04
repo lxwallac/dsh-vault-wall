@@ -52,6 +52,16 @@ window.__ModuleLoader__.load({
     function browseReady() {
       return uiSvc() !== null
     }
+    /** 读取 scope 快照（readScopeSnap 供 useScope seat 缺席时的自订阅回退使用）。 */
+    function readScopeSnap(scope) {
+      try {
+        if (scope && typeof scope.getSnapshot === 'function') {
+          var s = scope.getSnapshot()
+          if (s && typeof s === 'object') return s
+        }
+      } catch (e) { /* 忽略快照读取异常 */ }
+      return { status: 'unavailable', value: undefined, revision: undefined, writable: false, mode: 'memory' }
+    }
 
     // ---- 设计 token（官方 alias，主题自适应明暗） ----
     var tok = {
@@ -565,9 +575,22 @@ window.__ModuleLoader__.load({
 
     // ===================== 页面：规则列表 =====================
     function VaultWallSection(props) {
-      var useScope = props.useScope
+      // snap：优先用渲染器按 hooks.scope 绑定的 useScope seat；个别宿主没绑定时
+      // 退回自订阅 scope（getSnapshot/subscribe 契约，见 SettingsScopeController）。
+      var useScope = typeof props.useScope === 'function' ? props.useScope : null
       var scope = props.scope
-      var snap = useScope(function (s) { return s })
+      var snapState = useState(function () {
+        if (useScope) return useScope(function (s) { return s })
+        return readScopeSnap(scope)
+      })
+      var snap = snapState[0]
+      var setSnap = snapState[1]
+      useEffect(function () {
+        if (useScope) return
+        if (!scope || typeof scope.subscribe !== 'function') return
+        var off = scope.subscribe(function () { setSnap(readScopeSnap(scope)) })
+        return function () { off() }
+      }, [])
 
       var rawState = useState('')
       var rawText = rawState[0]
@@ -733,7 +756,10 @@ window.__ModuleLoader__.load({
         existingIds = listRules.filter(function (_, i) { return i !== edit.index }).map(function (r) { return r.id })
       }
 
-      if (snap.status === 'loading') return null
+      if (snap.status === 'loading') {
+        return h('div', { style: { padding: '4px 0', fontSize: 13, lineHeight: '20px', color: tok.text3 } },
+          '正在加载设置…（若长期停留，请重启宿主后重试并保留此页反馈）')
+      }
 
       // 说明 + 操作条
       var header = [
