@@ -1,0 +1,11 @@
+# dsh bundle layer: mount the Vault Wall plugin.
+# 与官方第三方 bundle 约定一致（dsh-hub / @liustack/modsearch 同款格式）：
+# 包名 = row id = row name，插件以函数插件命名导出（name/Config/apply）挂载。
+# config 显式给出规则与审计落盘路径（工作区外），消除主目录/环境推断差异，
+# 并为触碰审计提供持久证据文件。
+- insert:
+    - id: dsh-vault-wall
+      name: dsh-vault-wall
+      config:
+        rulesFile: 'C:/Users/dell/.dsh/vault-wall-rules.json'
+        auditFile: 'C:/Users/dell/.dsh/vault-wall-audit.jsonl'

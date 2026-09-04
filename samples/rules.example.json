@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "personal-vault",
+      "mode": "hidden",
+      "note": "个人敏感资料库：DSH 触碰时一律伪装成“不存在”",
+      "paths": [
+        "C:\\Users\\dell\\secret-box",
+        "D:\\keys\\id_ed25519"
+      ]
+    },
+    {
+      "id": "project-secrets",
+      "mode": "hidden",
+      "paths": [
+        "C:\\work\\repo\\.env",
+        "C:\\work\\repo\\credentials\\**"
+      ],
+      "tools": ["read", "read_image", "write", "edit", "glob", "grep", "bash", "pwsh"]
+    }
+  ]
+}
