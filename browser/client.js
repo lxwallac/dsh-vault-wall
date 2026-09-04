@@ -36,17 +36,16 @@ window.__ModuleLoader__.load({
     /** apply(ctx) 注入的客户端根 ctx（供弹窗目录选择使用）。 */
     var rootCtx = null
 
-    /** 延迟解析 uiWorkspace：先看激活注入的属性，再看 ctx.get；都没有则 null。 */
+    /** 延迟解析 uiWorkspace：只用 ctx.get 读取全局服务表（可选服务契约）。
+     *  绝不能访问 ctx.uiWorkspace 属性——未注入的服务在属性代理上会抛错。 */
     function uiSvc() {
       var c = rootCtx
       if (!c) return null
-      if (c.uiWorkspace && typeof c.uiWorkspace.listDirectory === 'function') return c.uiWorkspace
-      if (typeof c.get === 'function') {
-        try {
-          var g = c.get('uiWorkspace')
-          if (g && typeof g.listDirectory === 'function') return g
-        } catch (e) { /* service 未就绪/未知键 */ }
-      }
+      if (typeof c.get !== 'function') return null
+      try {
+        var g = c.get('uiWorkspace')
+        if (g && typeof g.listDirectory === 'function') return g
+      } catch (e) { /* service 未就绪/未知键 */ }
       return null
     }
     function browseReady() {
