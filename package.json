@@ -1,8 +1,23 @@
 {
   "name": "dsh-vault-wall",
-  "version": "0.2.30",
+  "version": "0.2.31",
   "description": "保险区 Vault Wall — 让 DeepSeek Harness 无法感知、无法触碰用户指定敏感路径的隔离墙插件（隔离墙 + 临时借出 + 触碰审计 + 紧急熔断）",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lxwallac/dsh-vault-wall.git"
+  },
+  "homepage": "https://github.com/lxwallac/dsh-vault-wall",
+  "bugs": {
+    "url": "https://github.com/lxwallac/dsh-vault-wall/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "privacy",
+    "security",
+    "vault"
+  ],
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -40,7 +55,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
-    "@deepseek-ai/dsh-tools": "^0.1.0",
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0",
     "@deepseek-ai/schemastery": "^3.0.0"
   }
 }
