@@ -24,7 +24,20 @@
 
 ## 安装（给使用者）
 
-**前提**：装有 DSH Desktop 且已有可用 profile（插件装进 profile 后需重启 DSH 生效）。
+**前提（重要，先说清楚）**
+
+本插件是 **DSH（DeepSeek Harness）的插件**，运行离不开 DSH 宿主，而不是一个独立程序：
+
+- 宿主侧（`src/`）依赖 DSH 提供的 cordis 运行时与 `settings` / `tools` 等服务；
+- 设置页 UI（`browser/client.js`）需要 DSH **内置 Web 设置前端**的注入（`window.__DSH_BOOT__` 由 dsh web 提供）。
+
+当前**验证过的宿主是 DSH Desktop（web profile）**；插件安装 CLI 也在 Desktop 的 `host-commands` 里。
+**未安装 Desktop 的"裸 DSH 运行时"未经验证、不作承诺**——如果将来出现不依赖 Desktop 的独立 DSH 发行版，
+届时需确认其是否带 dsh plugin CLI、settings 服务与 Web 前端注入后再安装本插件。
+
+因此请按以下顺序准备：
+1. 安装 **DSH Desktop** 并启动过一次，确认有可用 profile（如 `web`）；
+2. 插件装进该 profile 后**重启 DSH** 生效。
 
 任选一种来源安装（在 DSH Desktop 环境里执行，`<profile>` 换成你的 profile 名）：
 
