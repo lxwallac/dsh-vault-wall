@@ -568,6 +568,7 @@ window.__ModuleLoader__.load({
       // 不能包进其它 hook 初始化器，否则 Hook 顺序会错乱）。
       var scope = props.scope
       var snap = props.useScope(function (s) { return s })
+      var rawState = useState('')
       var rawText = rawState[0]
       var setRawText = rawState[1]
       var adoptedState = useState('')
