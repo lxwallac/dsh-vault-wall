@@ -1,11 +1,8 @@
 # dsh bundle layer: mount the Vault Wall plugin.
-# 与官方第三方 bundle 约定一致（dsh-hub / @liustack/modsearch 同款格式）：
-# 包名 = row id = row name，插件以函数插件命名导出（name/Config/apply）挂载。
-# config 显式给出规则与审计落盘路径（工作区外），消除主目录/环境推断差异，
-# 并为触碰审计提供持久证据文件。
+# id = name = 包名；函数插件命名导出（name/Config/apply）挂载。
+# 路径型配置不在 bundle 里硬编码（会随包发给所有用户）——
+# 由宿主默认解析：config > env DSH_VAULT_WALL_RULES > ~/.dsh/vault-wall-rules.json。
+# 需要自定义路径时，在 profile 自己的 cordis.patch.yml 里覆盖该行 config。
 - insert:
     - id: dsh-vault-wall
       name: dsh-vault-wall
-      config:
-        rulesFile: 'C:/Users/dell/.dsh/vault-wall-rules.json'
-        auditFile: 'C:/Users/dell/.dsh/vault-wall-audit.jsonl'
