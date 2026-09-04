@@ -5,7 +5,8 @@
  * 结构参考官方 ModelsSection（section 列宽 760、行卡片 = border-l4 .5px + radius16 +
  * pad 12/14、行头 identity + margin-left:auto 操作区、rowTag 边框注记、彩色圆点）。
  * 组件用宿主基线 primitives（Button/Input/Modal/Pill）；与宿主/服务端交互走
- * apply(ctx) 的 ctx 服务（slots、settingsScope、uiWorkspace 原生目录选择）。
+ * apply(ctx) 的 ctx 服务（slots、settingsScope；uiWorkspace 目录浏览为可选延迟依赖——
+ * 不在激活依赖列表里，避免无该服务的宿主整块 pending，可用时自动点亮「浏览」）。
  *
  * 功能：结构化隔离规则编辑器（规则卡片 + 新增/编辑 Modal + JSON 视图），
  * 绑定服务端 `vault-wall` 命名空间（schema 单字段 rulesJson），
@@ -29,10 +30,28 @@ window.__ModuleLoader__.load({
     var Pill = ui.Pill
     var IconPlusOutline16 = ui.IconPlusOutline16
 
-    /** cordis 服务依赖：slots=注册 section，settingsScope=命名空间，uiWorkspace=原生目录选择。 */
-    var inject = ['slots', 'settingsScope', 'uiWorkspace']
+    /** cordis 激活依赖：slots=注册 section，settingsScope=命名空间。
+     *  uiWorkspace（目录浏览）刻意不入列——缺失时不阻塞激活，改为延迟轮询（见 uiSvc）。 */
+    var inject = ['slots', 'settingsScope']
     /** apply(ctx) 注入的客户端根 ctx（供弹窗目录选择使用）。 */
     var rootCtx = null
+
+    /** 延迟解析 uiWorkspace：先看激活注入的属性，再看 ctx.get；都没有则 null。 */
+    function uiSvc() {
+      var c = rootCtx
+      if (!c) return null
+      if (c.uiWorkspace && typeof c.uiWorkspace.listDirectory === 'function') return c.uiWorkspace
+      if (typeof c.get === 'function') {
+        try {
+          var g = c.get('uiWorkspace')
+          if (g && typeof g.listDirectory === 'function') return g
+        } catch (e) { /* service 未就绪/未知键 */ }
+      }
+      return null
+    }
+    function browseReady() {
+      return uiSvc() !== null
+    }
 
     // ---- 设计 token（官方 alias，主题自适应明暗） ----
     var tok = {
@@ -286,7 +305,7 @@ window.__ModuleLoader__.load({
       }
 
       function canBrowse() {
-        return rootCtx && rootCtx.uiWorkspace && typeof rootCtx.uiWorkspace.listDirectory === 'function'
+        return browseReady()
       }
       /** naive Windows parent（绝对路径带尾分隔符）；已是根则返回 ''。 */
       function parentOf(p) {
@@ -299,9 +318,11 @@ window.__ModuleLoader__.load({
       }
       function loadBrowse(path) {
         if (!path) { setBrowseBusy(false); return }
+        var svc = uiSvc()
+        if (!svc) { setBrowseErr('目录浏览服务不可用（宿主未提供 uiWorkspace）'); setBrowseBusy(false); return }
         setBrowseBusy(true)
         setBrowseErr(null)
-        rootCtx.uiWorkspace.listDirectory(path).then(function (res) {
+        svc.listDirectory(path).then(function (res) {
           setBrowsePath(res && res.path ? res.path : path)
           setBrowseCrumbs(res && Array.isArray(res.crumbs) ? res.crumbs : [])
           setBrowseEntries(res && Array.isArray(res.entries) ? res.entries : [])
@@ -598,6 +619,23 @@ window.__ModuleLoader__.load({
         shiftDialog(delta)
         return function () { shiftDialog(0) }
       }, [modalVisible])
+
+      // uiWorkspace 服务延迟就绪轮询（不阻塞激活）：可用后点亮「浏览」。
+      var browseCapState = useState(browseReady())
+      var browseCapable = browseCapState[0]
+      var setBrowseCapable = browseCapState[1]
+      useEffect(function () {
+        var timer = null
+        function tick() {
+          if (browseReady()) { setBrowseCapable(true); return true }
+          return false
+        }
+        if (tick()) return
+        timer = setInterval(function () {
+          if (tick()) clearInterval(timer)
+        }, 700)
+        return function () { if (timer !== null) clearInterval(timer) }
+      }, [])
 
       var parsedRules = parseRules(rawText)
       var listRules = parsedRules && !parsedRules.error ? parsedRules : null
