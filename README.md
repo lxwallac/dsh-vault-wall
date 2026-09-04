@@ -31,13 +31,18 @@
 - 宿主侧（`src/`）依赖 DSH 提供的 cordis 运行时与 `settings` / `tools` 等服务；
 - 设置页 UI（`browser/client.js`）需要 DSH **内置 Web 设置前端**的注入（`window.__DSH_BOOT__` 由 dsh web 提供）。
 
-当前**验证过的宿主是 DSH Desktop（web profile）**；插件安装 CLI 也在 Desktop 的 `host-commands` 里。
-**未安装 Desktop 的"裸 DSH 运行时"未经验证、不作承诺**——如果将来出现不依赖 Desktop 的独立 DSH 发行版，
-届时需确认其是否带 dsh plugin CLI、settings 服务与 Web 前端注入后再安装本插件。
+当前**实测过的宿主是 DSH Desktop（web profile，内嵌宿主包 0.1.2-alpha.1）**，插件安装 CLI 在 Desktop 的 `host-commands` 里。
+
+**官方源码版"普通 dsh"（预期可用，未实测）**：官方仓库 deepseek-ai/deepseek-harness 的
+`apps/cli`（npm 包 `@deepseek-ai/dsh`，终端启动、浏览器访问 Web 交互）提供与本插件所用完全相同的宿主缝：
+`settings.section` 插槽、`settingsScope.bind`、`window.__ModuleLoader__.load`、`uiWorkspace` / `ui-primitives`
+（源码内嵌包版本 0.1.2-alpha.5，仅比 Desktop 高一档 alpha 补丁）。在该环境跑通 monorepo 构建后，
+用同一条 `dsh plugin ... add dsh-vault-wall` 安装即可；因未在该环境实测，界面细节以实际表现为准。
 
 因此请按以下顺序准备：
-1. 安装 **DSH Desktop** 并启动过一次，确认有可用 profile（如 `web`）；
-2. 插件装进该 profile 后**重启 DSH** 生效。
+1. 装有 DSH 宿主：**DSH Desktop**（已实测）或**官方源码版 dsh**（`apps/cli`，需先构建 monorepo）；
+2. 启动过一次，确认有可用 profile（如 `web`）；
+3. 插件装进该 profile 后**重启 dsh** 生效。
 
 任选一种来源安装（在 DSH Desktop 环境里执行，`<profile>` 换成你的 profile 名）：
 
