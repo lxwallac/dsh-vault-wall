@@ -22,15 +22,46 @@
 - `tests/` — 测试（`npm test`）
 - `samples/` — 示例
 
-## 安装
+## 安装（给使用者）
+
+**前提**：装有 DSH Desktop 且已有可用 profile（插件装进 profile 后需重启 DSH 生效）。
+
+任选一种来源安装（在 DSH Desktop 环境里执行，`<profile>` 换成你的 profile 名）：
 
 ```text
-# 在项目目录生成 tgz 后安装进某 profile（重启 DSH 生效）
-npm pack
-dsh plugin --profile <profile> add dsh-vault-wall-<version>.tgz
+# A) 从 npm 装（机器能直连 registry 时最方便）
+dsh plugin --profile <profile> add dsh-vault-wall
+dsh plugin --profile <profile> add dsh-vault-wall@0.2.24        # 锁版本
+
+# B) 从 GitHub Release 下载的 tgz 装（推荐给国内/镜像不稳定的机器）
+#    先在 https://github.com/lxwallac/dsh-vault-wall/releases 下载
+#    dsh-vault-wall-<version>.tgz，然后：
+dsh plugin --profile <profile> add ./dsh-vault-wall-0.2.24.tgz
+
+# C) 直接按 URL 装（同上，免下载）
+dsh plugin --profile <profile> add https://github.com/lxwallac/dsh-vault-wall/releases/download/v0.2.24/dsh-vault-wall-0.2.24.tgz
 ```
 
-重启后到「设置 → 保险区 Vault Wall」添加规则。
+> 提示：DSH 的 `plugin` 命令底层转发 pnpm；若你的网络默认走 npmmirror 等镜像，
+> 包名方式可能遇到"镜像未同步/重试"，此时用 B/C（tgz / URL）最稳。
+> 安装输出末尾的 `ERR_PNPM_IGNORED_BUILDS` 与"pnpm failed"退出码是已知噪音，不影响安装结果
+> （以 `node_modules/dsh-vault-wall/package.json` 的版本号为准）。
+
+装完重启 DSH，到「设置 → 保险区 Vault Wall」添加规则。
+
+## 开发 / 维护（给贡献者）
+
+```text
+npm test          # 运行单元测试
+npm pack          # 本地打 tgz（文件名 dsh-vault-wall-<version>.tgz）
+
+# 发布新版本（先改 package.json 的 version）
+npm publish       # 推到 npm：https://www.npmjs.com/package/dsh-vault-wall
+gh release create v<version> dsh-vault-wall-<version>.tgz --repo lxwallac/dsh-vault-wall
+git tag v<version> && git push origin v<version>
+```
+
+- 源码：https://github.com/lxwallac/dsh-vault-wall （MIT，见 LICENSE）
 
 ## 规则结构（设置页内 JSON / 保存格式）
 
