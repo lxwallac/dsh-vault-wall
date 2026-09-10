@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import { RulesEngine } from '../src/rules.js'
 import { BorrowStore } from '../src/borrow.js'
-import { decideWall, compileAllowRoots } from '../src/wall-core.js'
+import { decideWall, compileAllowRoots, probeWall } from '../src/wall-core.js'
 
 const base = path.resolve('__vw_wall_test_root__')
 const vault = path.join(base, 'vault')
@@ -158,4 +158,42 @@ test('祖先递归穿透防护：shell 带递归标记且提到父目录被拦�
   assert.equal(flat.decision, 'allow')
   const safe = decideWall(exec('pwsh', { command: `Get-ChildItem -Recurse "${path.join(demo, 'other')}"` }), st)
   assert.equal(safe.decision, 'allow')
+})
+
+test('v0.3：str_replace_editor 与文件工具同判，伪装文案为“编辑失败”', () => {
+  const target = path.join(vault, 'deep', 'a.txt')
+  const decision = decideWall(exec('str_replace_editor', { command: 'view', path: target }), stateOf())
+  assert.equal(decision.decision, 'hidden-deny')
+  assert.equal(decision.ruleId, 'vault')
+  assert.match(decision.reason, /^cannot edit "/)
+})
+
+test('v0.3：代码执行工具（run_code / cordis_define）按文本启发式拦截', () => {
+  const code = `await tools.read({ file_path: ${JSON.stringify(path.join(vault, 'x.txt'))} })`
+  const run = decideWall(exec('run_code', { code, description: 'x' }), stateOf())
+  assert.equal(run.decision, 'hidden-deny')
+  assert.equal(run.ruleId, 'vault')
+  const define = decideWall(exec('cordis_define', { code: { host: `read(${JSON.stringify(path.join(vault, 'x.txt'))})` } }), stateOf())
+  assert.equal(define.decision, 'hidden-deny')
+  // 不含受保护路径的源码照常放行
+  assert.equal(decideWall(exec('run_code', { code: 'return 1' }), stateOf()).decision, 'allow')
+})
+
+test('v0.3：probeWall 试算不消耗借出，也不改变状态', () => {
+  const agent = { id: 'a' }
+  const borrow = new BorrowStore()
+  const grant = borrow.grant(agent, { path: vault, kind: 'once' })
+  const st = stateOf({ borrow })
+  const target = path.join(vault, 'a.txt')
+
+  // 试算：看不到借出（试算回答的是“新 agent 会怎么被判”），且不消耗
+  const probed = probeWall(exec('read', { file_path: target }, agent), st)
+  assert.equal(probed.decision, 'hidden-deny')
+  assert.equal(borrow.list(agent).length, 1)
+  assert.equal(borrow.list(agent)[0].used, false, 'once 借出不得被试算消耗')
+
+  // 真实判定仍然放行并消耗掉 once
+  const real = decideWall(exec('read', { file_path: target }, agent), st)
+  assert.equal(real.decision, 'borrow-allow')
+  assert.equal(borrow.list(agent)[0].used, true, `借出 ${grant.id} 应被真实调用消耗`)
 })

@@ -190,12 +190,51 @@ window.__ModuleLoader__.load({
         return { error: String(error && error.message ? error.message : error) }
       }
       if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return { error: '顶层必须是对象文档' }
+      // v0.3：不再静默忽略版本 —— 宿主只认 version 1，编辑器也只写 version 1，
+      // 静默接受会让「保存」把 version 2 的文档悄悄改写掉。
+      if (doc.version !== undefined && doc.version !== 1) {
+        return { error: '只支持 version 1 文档（当前 version=' + JSON.stringify(doc.version) + '）' }
+      }
       if (!Array.isArray(doc.rules)) return { error: '缺少 rules 数组' }
       return doc.rules
     }
 
     function serialize(rules) {
       return JSON.stringify({ version: 1, rules: rules }, null, 2)
+    }
+
+    /** 浏览器所在平台是否 Windows（用于判定“绝对路径”的形态）。 */
+    function isWindowsHost() {
+      try {
+        var p = (typeof navigator !== 'undefined' && (navigator.platform || navigator.userAgent)) || ''
+        return /win/i.test(String(p))
+      } catch (e) {
+        return true // 拿不到就按 Windows 判（本插件主战场是 DSH Desktop/web on Windows）
+      }
+    }
+
+    /** 与宿主 src/rules.js `normalizeAbs` 同义的绝对路径判定，避免「界面说保存成功、引擎其实拒绝」。 */
+    function isAbsolutePath(value) {
+      var v = String(value ?? '').trim()
+      if (v === '') return false
+      if (isWindowsHost()) {
+        if (/^[A-Za-z]:[\\/]/.test(v)) return true // C:\... 或 C:/...
+        if (/^[\\/]{2}[^\\/]/.test(v)) return true // UNC \\server\share
+        if (/^[\\/]/.test(v)) return true          // 当前盘根 \dir
+        return false
+      }
+      return /^\//.test(v) // POSIX 绝对路径
+    }
+
+    /** 路径规格的可用性问题；没问题返回 null。与宿主 RulesEngine 的校验口径对齐。 */
+    function pathProblem(value) {
+      var v = String(value ?? '').trim()
+      if (v === '') return '路径不能为空'
+      if (!isAbsolutePath(v)) {
+        return '必须是绝对路径（如 ' + (isWindowsHost() ? 'C:\\Users\\you\\secret-box' : '/home/you/secret-box') + '）：' + v
+      }
+      if (/[?[\]]/.test(v)) return '暂不支持 ? 与 [] 通配符（段内 * 与整段 ** 可用）：' + v
+      return null
     }
 
     function validateRules(rules) {
@@ -209,6 +248,17 @@ window.__ModuleLoader__.load({
         var paths = Array.isArray(rule.paths) ? rule.paths : []
         if (paths.length === 0 || paths.some(function (p) { return typeof p !== 'string' || p.trim() === '' })) {
           return '规则 ' + rule.id + ' 至少需要一个非空路径'
+        }
+        // v0.3：路径必须绝对 + 通配符合法。否则保存看似成功、宿主引擎却会拒绝重建
+        //（保留上一份规则），页面还显示「已保存并生效」——那是假的。
+        for (var j = 0; j < paths.length; j += 1) {
+          var problem = pathProblem(paths[j])
+          if (problem !== null) return '规则 ' + rule.id + ' 的路径有问题：' + problem
+        }
+        if (rule.tools !== undefined) {
+          if (!Array.isArray(rule.tools) || rule.tools.length === 0 || rule.tools.some(function (t) { return typeof t !== 'string' || t.trim() === '' })) {
+            return '规则 ' + rule.id + ' 的 tools 必须是非空字符串数组'
+          }
         }
       }
       return null
@@ -297,6 +347,8 @@ window.__ModuleLoader__.load({
       function addPath(raw) {
         var value = String(raw || '').trim()
         if (value === '') return
+        var problem = pathProblem(value)
+        if (problem !== null) { setErr(problem); return }
         if (paths.indexOf(value) !== -1) { setErr('该路径已添加：' + value); return }
         setPaths(paths.concat([value]))
         setAddInput('')
@@ -336,7 +388,8 @@ window.__ModuleLoader__.load({
         setErr(null)
         if (!canBrowse()) return
         setBrowseOpen(true)
-        var start = 'C:\\'
+        // 默认起点：已有路径的父目录 → 否则按平台给根（Windows 盘符根 / POSIX `/`）。
+        var start = isWindowsHost() ? 'C:\\' : '/'
         if (paths.length > 0) {
           var parent = parentOf(paths[paths.length - 1])
           if (parent) start = parent
@@ -434,6 +487,11 @@ window.__ModuleLoader__.load({
         if (trimmedId === '') { setErr('规则 id 不能为空'); return }
         if ((props.existingIds || []).indexOf(trimmedId) !== -1) { setErr('id 已存在：' + trimmedId); return }
         if (paths.length === 0) { setErr('至少添加一个绝对路径'); return }
+        // 再兜一次：手改 JSON 视图或旧草稿里可能残留非绝对路径/非法通配。
+        for (var k = 0; k < paths.length; k += 1) {
+          var problem = pathProblem(paths[k])
+          if (problem !== null) { setErr(problem); return }
+        }
         var rule = { id: trimmedId, mode: mode, paths: paths.slice() }
         if (toolsOnly) {
           if (toolsSel.length === 0) { setErr('请至少勾选一个工具，或改回「全部」'); return }
@@ -456,7 +514,7 @@ window.__ModuleLoader__.load({
         open: props.open,
         onClose: props.onClose,
         className: vwDialogClass,
-        title: initial ? '编辑文件' : 'add',
+        title: initial ? '编辑规则' : '新增规则',
         closeLabel: '关闭',
         footer: h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 8 } },
           h(Button, { variant: 'ghost', style: ghostOutline, onClick: props.onClose }, '取消'),
@@ -499,7 +557,9 @@ window.__ModuleLoader__.load({
                 style: { width: '100%' },
               }),
               h(Button, { variant: 'primary', size: 'sm', onClick: function () { addPath(addInput) } }, '添加'),
-              canBrowse() ? h(Button, { variant: 'ghost', size: 'sm', style: ghostOutline, onClick: openBrowser }, '浏览') : null))),
+              canBrowse() ? h(Button, { variant: 'ghost', size: 'sm', style: ghostOutline, onClick: openBrowser }, '浏览') : null),
+            h('p', { style: { margin: '4px 0 0', fontSize: 11, lineHeight: '16px', color: tok.text3 } },
+              '目录写全路径即整树保护；支持段内 * 与跨层 **，例：C:\\repos\\**\\.env 命中任意深度下的 .env。'))),
         h('div', { style: fieldRowStyle() },
           h('div', { style: fieldLabelStyle() }, '备注'),
           h('div', { style: rightCol },
@@ -747,7 +807,7 @@ window.__ModuleLoader__.load({
             icon: h(IconPlusOutline16, { size: 16 }),
             disabled: !editable,
             onClick: function () { setEdit({ new: true }); setPageErr(null) },
-          }, '新增文件'),
+          }, '新增规则'),
           h(Button, { variant: 'ghost', style: ghostOutline, disabled: !editable, onClick: function () { setJsonOpen(true); setPageErr(null) } }, '以 JSON 编辑'),
           dirty ? h(Button, { variant: 'ghost', style: ghostOutline, onClick: revert }, '放弃更改') : null,
           h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 8, marginLeft: 'auto' } },
@@ -808,7 +868,7 @@ window.__ModuleLoader__.load({
 
       var emptyState = listRules === null || listRules.length === 0
         ? h('div', { key: 'empty', style: { ...rowCard, padding: '14px 16px', color: tok.text3, fontSize: 13, lineHeight: '20px' } },
-            parseWarn() !== null ? '等待修正为合法 JSON…' : '还没有隔离规则——点「新增文件」添加第一条。')
+            parseWarn() !== null ? '等待修正为合法 JSON…' : '还没有隔离规则——点「新增规则」添加第一条。')
         : h('div', { key: 'list', style: { display: 'flex', flexDirection: 'column', gap: 10, marginTop: 14 } }, cards)
 
       return h('div', { ref: rootRef, style: { display: 'flex', flexDirection: 'column', gap: 4, width: '100%', maxWidth: 760, color: tok.text } },

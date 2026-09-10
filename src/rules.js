@@ -58,12 +58,25 @@ function hasGlob(value) {
  * 规则：
  *  - 以 `<sep>**` 结尾 → 该目录整棵树；
  *  - 段内 `*` → 该段内任意字符（不跨分隔符）；
- *  - `?` 与 `[...]` 字符类在 v1 不支持，直接 fail-loud；
+ *  - 路径中段的 `**`（v0.3 新增）→ **任意层目录**（含零层，可跨分隔符），
+ *    例：`C:\repos\**\.env` 命中 `C:\repos\.env` 与 `C:\repos\a\b\.env`；
+ *  - `?` 与 `[...]` 字符类仍不支持，直接 fail-loud；
  *  - 否则 → 等于或位于其下（既能圈目录树，也能圈单个文件）。
+ *
+ * 注意（写入 README 边界）：中段 `**` 只保证「直接触碰命中文件被拦」；
+ * 祖先目录上的**递归聚合**（glob/grep 扫父目录）无法穷举深度，仍属文本启发式边界。
  */
 export function compileSpec(spec) {
-  const abs = normalizeAbs(spec)
-  if (abs === '') throw new Error(`vault-wall: path spec must be an absolute path: ${JSON.stringify(spec)}`)
+  const normalized = normalizeAbs(spec)
+  if (normalized === '') throw new Error(`vault-wall: path spec must be an absolute path: ${JSON.stringify(spec)}`)
+
+  // 末尾分隔符不影响语义，但会让「`…\dir\**\` 这种多打一个反斜杠的写法」变成一个
+  // 永远匹配不上的正则。这里先把它去掉（POSIX 根 `/` 与 Windows 盘根 `C:\` 除外）。
+  let abs = normalized
+  if (abs.length > 1 && abs.endsWith(SEP)) {
+    const trimmed = abs.slice(0, -1)
+    if (trimmed !== '' && !/^[A-Za-z]:$/.test(trimmed)) abs = trimmed
+  }
 
   const doubleStar = SEP + '**'
   if (abs.endsWith(doubleStar)) {
@@ -73,12 +86,39 @@ export function compileSpec(spec) {
 
   if (hasGlob(abs)) {
     if (/[?[\]]/.test(abs)) {
-      throw new Error(`vault-wall: unsupported glob in ${JSON.stringify(spec)} — v1 supports only \`*\` within a segment and a trailing \`${SEP}**\` tree marker`)
+      throw new Error(`vault-wall: unsupported glob in ${JSON.stringify(spec)} — v1 supports only \`*\` within a segment, a path-segment \`**\`, and a trailing \`${SEP}**\` tree marker`)
     }
-    const withinSegment = `[^${escapeRegExp(SEP)}]*`
-    // 逐字符构建：`*` → 段内通配；其余字符转义。不可先整体转义再替换（会把 `*` 一起转义掉）。
+    const escapedSep = escapeRegExp(SEP)
+    const withinSegment = `[^${escapedSep}]*`
+    // 整段 `**` → 零层或多层目录。分隔符由本组自带，因此「零层」直接命中同级子项：
+    // `…\repos\**\.env` 命中 `…\repos\.env`（零层）与 `…\repos\a\b\.env`（多层）。
+    const acrossSegments = `(?:${escapedSep}[^${escapedSep}]+)*`
+    /** 位置 i 是否是整段 `**` 的起点（前后都在段边界上）。 */
+    const isWholeSegmentDoubleStar = (i) => {
+      if (abs[i] !== '*' || abs[i + 1] !== '*') return false
+      const after = i + 2
+      const startOk = i === 0 || abs[i - 1] === SEP
+      const endOk = after >= abs.length || abs[after] === SEP
+      return startOk && endOk
+    }
+    // 逐字符构建：整段 `**` → 跨层通配；单个 `*` → 段内通配；其余字符转义。
+    // 不可先整体转义再替换（会把 `*` 一起转义掉）。
     let source = '^'
-    for (const ch of abs) {
+    for (let i = 0; i < abs.length; i += 1) {
+      const ch = abs[i]
+      if (isWholeSegmentDoubleStar(i)) {
+        source += acrossSegments
+        i += 1
+        continue
+      }
+      // `**` 之前的那个分隔符交给跨层组自带，否则「零层」会要求多出一级目录。
+      if (ch === SEP && isWholeSegmentDoubleStar(i + 1)) continue
+      if (ch === '*' && abs[i + 1] === '*') {
+        // 非整段的 `**`（如 `a**b`）：退化为两个段内 `*`
+        source += withinSegment + withinSegment
+        i += 1
+        continue
+      }
       source += ch === '*' ? withinSegment : escapeRegExp(ch)
     }
     source += '$'
@@ -191,8 +231,14 @@ export class RulesEngine {
 }
 
 /**
- * 判断一段命令文本是否“提到”某个受保护根（文本级启发式，v1 专用，见 README 限制）。
+ * 判断一段命令文本是否“提到”某个受保护根（文本级启发式，见 README 限制）。
  * 要求命中前是词边界、命中后是路径边界，降低 `D:\keys2` 误伤 `D:\keys` 的概率。
+ *
+ * v0.3 增补：先走字面快路径；未命中时再用**分隔符宽松**模式重试 —— 把根里的分隔符
+ * 当成 `[\\/]+` 匹配，于是下面这些真实世界的写法也能被认出来：
+ *   - 正斜杠变体：规则 `C:\vault`，命令里写 `C:/vault/x`；
+ *   - 转义变体：代码/JSON 文本里的 `C:\\vault\\x`（字符串里反斜杠被转义成两个）。
+ * 这堵住了「代码执行类工具（run_code / cordis_define）用转义路径绕过文本启发式」的常见形态。
  */
 export function textMentions(textValue, rootAbs) {
   const text = String(textValue ?? '')
@@ -200,21 +246,31 @@ export function textMentions(textValue, rootAbs) {
   if (text.length === 0 || root === '') return false
   const cText = ci(text)
   const cRoot = ci(root)
-  const boundary = (index) => {
-    if (index < 0) return false
-    const prev = index === 0 ? '' : cText[index - 1]
-    const next = index + cRoot.length
-    const after = next >= cText.length ? '' : cText[next]
+  const wordish = /[A-Za-z0-9_]/
+  const boundaryAt = (start, length) => {
+    if (start < 0) return false
+    const prev = start === 0 ? '' : cText[start - 1]
+    const after = start + length >= cText.length ? '' : cText[start + length]
     // 词边界只以字母/数字/下划线为准：`\`、`/`、`-`、`.`、`:` 都不构成断词，
     // 因此 `D:\keys\a`（后随 `\`）是命中，而 `D:\keys2`（后随 `2`）不是。
-    const wordish = /[A-Za-z0-9_]/
     return !wordish.test(prev) && !wordish.test(after)
   }
-  let from = 0
-  for (;;) {
+
+  // 快路径：逐字面出现（绝大多数情况第一次就命中）。
+  for (let from = 0; ;) {
     const at = cText.indexOf(cRoot, from)
-    if (at < 0) return false
-    if (boundary(at)) return true
+    if (at < 0) break
+    if (boundaryAt(at, cRoot.length)) return true
     from = at + 1
   }
+
+  // 宽松路径：分隔符按 `[\\/]+` 匹配（含正斜杠、双反斜杠等变体）。
+  const segments = cRoot.split(/[\\/]+/).filter((segment) => segment !== '')
+  if (segments.length === 0) return false
+  const loose = new RegExp(segments.map(escapeRegExp).join(String.raw`[\\/]+`), 'g')
+  for (let m = loose.exec(cText); m !== null; m = loose.exec(cText)) {
+    if (boundaryAt(m.index, m[0].length)) return true
+    if (m.index === loose.lastIndex) loose.lastIndex += 1 // 零宽防死循环
+  }
+  return false
 }

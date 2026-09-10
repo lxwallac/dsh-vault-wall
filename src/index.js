@@ -1,14 +1,16 @@
 /**
  * 保险区 Vault Wall —— 插件入口（薄接线层）。v0.2：规则主源迁移到官方设置命名空间。
  *
- * 决策逻辑全部在 `./wall-core.js`（纯函数）；规则文档解析/自保护注入在 `./doc-bridge.js`。
- * 本文件只做 cordis 接线：
+ * 决策逻辑全部在 `./wall-core.js`（纯函数）；规则文档解析/自保护注入在 `./doc-bridge.js`；
+ * `/wall` 命令语义在 `./console.js`（纯逻辑，可单测）。本文件只做 cordis 接线：
  *  - 强制点：`ctx.tools.guard()`（单调，永不抛出）；服务就绪前由 watchdog 轮询重试；
  *  - **设置命名空间 `vault-wall`**：schema = `{ rulesJson: string }`（规则全文 JSON 编辑器）。
  *    · 解析值 = schema 默认（''）→ 组合 base（= 旧规则文件内容种子）→ 用户层覆盖；
  *    · `watch` 实时生效：用户在官方设置页保存即重建引擎，无需重启；
  *    · `ctx.settings` 缺席（无 settings-file provider 的环境）时回退旧规则文件模式；
- *  - **自保护**：引擎注入 hidden 规则——规则文件/审计文件对 agent 工具不可读不可写；
+ *  - **自保护**：引擎注入 hidden 规则——规则文件/审计文件/设置文档对 agent 工具不可读不可写。
+ *    v0.3 修正：设置文档路径优先取宿主 `settings.documentPath`（宿主解析，含 config.path 覆盖），
+ *    兜底才用 `<dsh home>/settings.yaml`（`$DSH_HOME` → `~/.dsh`，见 doc-bridge.js）；
  *  - `/wall` 命令 + 审计 JSONL 落盘保持不变。
  *
  * 导出约定遵循官方函数插件：命名导出 name/Config/apply，无 default export。
@@ -22,7 +24,8 @@ import { RulesEngine } from './rules.js'
 import { BorrowStore } from './borrow.js'
 import { AuditRing } from './audit.js'
 import { decideWall, compileAllowRoots } from './wall-core.js'
-import { parseRulesJson, selfPathsFor, assembleRawDoc } from './doc-bridge.js'
+import { parseRulesJson, selfPathsFor, assembleRawDoc, defaultSettingsDocPath } from './doc-bridge.js'
+import { handleWallCommand, WALL_COMMAND_HINT } from './console.js'
 
 export const name = 'dsh-vault-wall'
 
@@ -65,131 +68,7 @@ function readLegacyText(filePath, strict) {
   }
 }
 
-/** 简陋但够用的参数切词：支持双/单引号包裹（路径可含空格），其余按空白切。 */
-function splitArgs(input) {
-  const out = []
-  const re = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+/g
-  let m
-  while ((m = re.exec(input)) !== null) {
-    let token = m[0]
-    if (token.length >= 2 && (token[0] === '"' || token[0] === "'")) token = token.slice(1, -1)
-    out.push(token)
-  }
-  return out
-}
-
-/** /wall 命令处理器。 */
-function handleWall(state, invocation) {
-  const fail = (text) => ({ kind: 'error', text })
-  const ok = (text) => ({ kind: 'success', text })
-  const raw = String(invocation.rawInput ?? '').trim()
-  const tokens = splitArgs(raw)
-  const sub = (tokens[0] ?? '').toLowerCase()
-  switch (sub) {
-    case 'status':
-      return ok([
-        'Vault Wall status',
-        `engine: ${state.engine === null ? 'uninitialized' : `${state.engine.size} rule(s) active (incl. self-protection)`}`,
-        `source: ${state.source}${state.sourceDetail !== '' ? ` (${state.sourceDetail})` : ''}`,
-        ...(state.lastError !== '' ? [`last error: ${state.lastError}`] : []),
-        `rules file (legacy): ${state.legacyFile}`,
-        `panic: ${state.panic ? 'ON (只允许 panicAllowRoots 内路径)' : 'off'}`,
-        `borrows: ${state.borrow.list(invocation.agent).length}`,
-        `audit: ${state.audit.items.length} entries (cap ${state.audit.cap})${state.audit.filePath !== '' ? ` → ${state.audit.filePath}` : ''}`,
-      ].join('\n'))
-    case 'rules':
-      if (state.engine === null) return ok('No rules loaded.')
-      return ok(state.engine.entries.map((entry) => {
-        const tools = entry.toolSet === undefined ? 'all' : [...entry.toolSet].join(',')
-        return `- [${entry.id}] mode=${entry.mode} tools=${tools}${entry.note ? ` note=${entry.note}` : ''}`
-      }).join('\n'))
-    case 'decisions': {
-      const n = tokens[1] === undefined ? 20 : Number.parseInt(tokens[1], 10)
-      const limit = Number.isFinite(n) && n > 0 ? n : 20
-      const rows = state.audit.list().slice(0, limit)
-      if (rows.length === 0) return ok('No decisions recorded yet.')
-      return ok(rows.map((r) => {
-        const when = new Date(r.ts).toISOString()
-        const who = r.agentLabel === undefined ? '' : ` ${r.agentLabel}`
-        const detail = r.ruleId !== undefined ? ` rule=${r.ruleId}` : ''
-        const pathPart = r.path !== undefined ? ` ${JSON.stringify(r.path)}` : ''
-        return `${when}${who} ${r.tool} → ${r.decision}${pathPart}${detail}${r.reason !== undefined ? ` (${r.reason})` : ''}`
-      }).join('\n'))
-    }
-    case 'reload': {
-      try {
-        if (state.source === 'settings') {
-          const value = state.settingsRead === undefined ? {} : state.settingsRead()
-          state.applyUserRules(String(value?.rulesJson ?? ''), 'settings')
-        } else {
-          const text = readLegacyText(state.legacyFile, false)
-          state.applyUserRules(text, 'file')
-        }
-        return ok(`Reloaded. source=${state.source} engine=${state.engine === null ? 0 : state.engine.size} rule(s)${state.lastError !== '' ? ` error=${state.lastError}` : ''}`)
-      } catch (error) {
-        return fail(String(error?.message ?? error))
-      }
-    }
-    case 'panic': {
-      const target = (tokens[1] ?? '').toLowerCase()
-      if (target === 'on') {
-        state.panic = true
-        return ok('Vault Wall panic ON — 仅 panicAllowRoots 内的路径可触碰。')
-      }
-      if (target === 'off') {
-        state.panic = false
-        return ok('Vault Wall panic OFF.')
-      }
-      return ok(`panic: ${state.panic ? 'ON' : 'off'}`)
-    }
-    case 'borrow': {
-      const action = (tokens[1] ?? '').toLowerCase()
-      if (action === 'list') {
-        const grants = state.borrow.list(invocation.agent)
-        if (grants.length === 0) return ok('No active borrows for this agent.')
-        return ok(grants.map((g) => `- ${g.id} ${g.mode} ${g.kind} ${g.path}${g.expiresAt !== undefined ? ` expires=${new Date(g.expiresAt).toISOString()}` : ''}${g.used ? ' used' : ''}`).join('\n'))
-      }
-      if (action === 'revoke') {
-        const id = tokens[2]
-        if (id === undefined) return fail('Usage: /wall borrow revoke <id>')
-        return state.borrow.revoke(invocation.agent, id)
-          ? ok(`Revoked ${id}.`)
-          : fail(`No borrow ${JSON.stringify(id)} for this agent.`)
-      }
-      if (action === 'clear') {
-        for (const grant of state.borrow.list(invocation.agent)) state.borrow.revoke(invocation.agent, grant.id)
-        return ok('Cleared all borrows for this agent.')
-      }
-      if (action === 'add') {
-        const rest = tokens.slice(2)
-        let borrowPath
-        let ttlMs = 60_000
-        let mode = 'read'
-        for (let i = 0; i < rest.length; i += 1) {
-          const token = rest[i]
-          if (token === '--ttl') {
-            const value = Number(rest[i + 1])
-            if (!Number.isFinite(value) || value < 0) return fail('--ttl requires a non-negative number of milliseconds')
-            ttlMs = value
-            i += 1
-          } else if (token === '--rw') {
-            mode = 'read-write'
-          } else if (borrowPath === undefined) {
-            borrowPath = token
-          } else {
-            return fail(`Unexpected argument ${JSON.stringify(token)}`)
-          }
-        }
-        if (borrowPath === undefined) return fail('Usage: /wall borrow add <absolute-path> [--ttl <ms>] [--rw]')
-        const grant = state.borrow.grant(invocation.agent, { path: borrowPath, mode, kind: ttlMs === 0 ? 'once' : 'ttl', ttlMs })
-        return ok(`Borrowed ${grant.id}: ${grant.path} (${grant.mode}, ${grant.kind}) for this agent.`)
-      }
-      return fail('borrow 子命令: add <path> [--ttl <ms>] [--rw] | list | revoke <id> | clear')
-    }
-    default:
-      return fail('Usage: /wall status | rules | decisions [n] | reload | panic [on|off] | borrow add <path> [--ttl <ms>] [--rw] | borrow list | borrow revoke <id>')
-  }
-}
+/** 参数切词与 `/wall` 命令语义都在 `./console.js`（纯逻辑、可单测），本文件只做接线。 */
 
 /**
  * 插件装载。
@@ -199,6 +78,9 @@ function handleWall(state, invocation) {
 export function apply(ctx, config) {
   const legacyFile = resolveRulesFile(config)
   const auditPath = typeof config.auditFile === 'string' ? config.auditFile : ''
+  const allowRoots = compileAllowRoots(config.panicAllowRoots)
+  /** 设置文档兜底路径（`$DSH_HOME` → `~/.dsh`）；服务在线时会被 documentPath 覆盖。 */
+  const fallbackSettingsDoc = defaultSettingsDocPath(process.env, os.homedir())
   const state = {
     panic: false,
     engine: null,
@@ -208,6 +90,9 @@ export function apply(ctx, config) {
     lastError: '',
     legacyFile,
     auditPath,
+    allowRoots,
+    /** settings.documentPath 读到的真实文档路径（权威）；'' 表示尚未拿到。 */
+    settingsDocPath: '',
     borrow: new BorrowStore(),
     audit: new AuditRing(config.auditLimit ?? 500, auditPath),
     agentSeq: 0,
@@ -252,15 +137,24 @@ export function apply(ctx, config) {
       console.log(`[dsh-vault-wall] rules loaded from ${sourceLabel}: ${rules.length} user rule(s), ${state.engine.size} total (incl self-protection)`)
     },
     selfPaths() {
-      const settingsHome = process.env.DSH_HOME || os.homedir()
-      const settingsDoc = path.join(settingsHome, 'settings.yaml')
+      // 权威优先：宿主 settings 服务在线时用它的 documentPath（含 config.path 覆盖）；
+      // 否则退回默认 `<dsh home>/settings.yaml`。修正 0.2.31 的 `DSH_HOME || homedir` 路径错。
+      const authoritative = state.settingsDocPath
+      const settingsDoc = authoritative !== '' ? authoritative : fallbackSettingsDoc
       return selfPathsFor({
         legacyFile: state.legacyFile,
         legacyExists: fs.existsSync(state.legacyFile),
         auditPath: state.auditPath,
         settingsDoc,
-        settingsDocExists: state.settingsAttached && fs.existsSync(settingsDoc),
+        settingsDocExists: fs.existsSync(settingsDoc),
+        settingsDocAuthoritative: authoritative !== '',
       })
+    },
+    readLegacyText(file) {
+      return readLegacyText(file, false)
+    },
+    writeFile(file, text) {
+      fs.writeFileSync(file, text, 'utf8')
     },
   }
 
@@ -272,14 +166,13 @@ export function apply(ctx, config) {
   }
 
   const disposers = []
-  const allowRoots = compileAllowRoots(config.panicAllowRoots)
 
   const guard = (exec) => {
     try {
       const decision = decideWall(exec, {
         engine: state.engine,
         panic: state.panic,
-        allowRoots,
+        allowRoots: state.allowRoots,
         borrow: state.borrow,
       })
       state.audit.push({
@@ -323,9 +216,9 @@ export function apply(ctx, config) {
     if (commands !== undefined && typeof commands.register === 'function') {
       commands.register({
         name: 'wall',
-        description: '保险区 Vault Wall 控制台：状态/规则/决策/借出/熔断',
-        input: { hint: 'status | rules | decisions [n] | reload | panic [on|off] | borrow add <path> [--ttl <ms>] [--rw] | borrow list | borrow revoke <id>' },
-        handler: (invocation) => handleWall(state, invocation),
+        description: '保险区 Vault Wall 控制台：状态/规则/决策/试算/借出/熔断',
+        input: { hint: WALL_COMMAND_HINT },
+        handler: (invocation) => handleWallCommand(state, invocation),
       })
       state.commandAttached = true
       state.audit.push({ tool: 'system', decision: 'command-registered' })
@@ -346,6 +239,16 @@ export function apply(ctx, config) {
     if (settings === undefined || typeof settings.register !== 'function') return false
     state.settingsFailed = true // 只尝试一次注册；失败即回退旧文件模式
     try {
+      // 宿主自己解析过的文档路径（含 config.path 覆盖）才是自保护该圈的那个文件。
+      // 读不到就退回默认 `<dsh home>/settings.yaml`；两者都不阻塞注册。
+      try {
+        const docPath = settings.documentPath
+        if (typeof docPath === 'string' && docPath.trim() !== '') {
+          state.settingsDocPath = path.resolve(docPath.trim())
+        }
+      } catch (error) {
+        log(`settings.documentPath unavailable: ${error?.message ?? error}`)
+      }
       const seed = readLegacyText(state.legacyFile, false)
       const schema = z.object({ rulesJson: z.string().default('') })
       const scope = settings.register('vault-wall', schema, { base: { rulesJson: seed }, applies: 'live' })
@@ -398,7 +301,9 @@ export function apply(ctx, config) {
         state.sourceDetail = state.legacyFile
         log('settings service unavailable — using legacy rules file mode')
       } else {
-        state.sourceDetail = 'settings doc "vault-wall".rulesJson'
+        state.sourceDetail = state.settingsDocPath !== ''
+          ? `settings doc "vault-wall".rulesJson @ ${state.settingsDocPath}`
+          : 'settings doc "vault-wall".rulesJson'
       }
     }
   }, 250)

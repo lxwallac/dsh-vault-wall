@@ -7,7 +7,8 @@
  *   panic 开启 → 一切落在 allowRoots 之外的路径型参数 / 命令绝对 token 被拒。
  * 未知工具与无命中 → allow。
  *
- * 副作用仅一处：`state.borrow.allow(...)`（消耗 once 借出），由调用方注入。
+ * 副作用仅一处：`state.borrow.allow(...)`（消耗 once 借出），由调用方注入；
+ * `state.borrow` 缺席时无副作用（试算用 `probeWall`，见文件末尾）。
  */
 
 import { classifyToolArgs, absolutePathTokens } from './classify.js'
@@ -66,6 +67,7 @@ export function hiddenReason(toolName, p) {
     case 'write':
       return `cannot write "${p}": directory does not exist`
     case 'edit':
+    case 'str_replace_editor':
       return `cannot edit "${p}": not found`
     case 'glob':
       return `no files matched under "${p}": path does not exist`
@@ -82,6 +84,16 @@ export function denialReason(toolName, p, entry) {
     return `[vault-wall] access to "${p}" is denied by rule "${entry.id}"`
   }
   return hiddenReason(toolName, p)
+}
+
+/**
+ * 借出放行查询：`state.borrow` 允许缺席（试算路径不注入借出存储）。
+ * 缺席时一律视为“没有借出”，且不产生任何副作用。
+ */
+function borrowAllow(state, agent, targetAbs, toolName) {
+  const store = state.borrow
+  if (store === undefined || store === null) return false
+  return store.allow(agent, targetAbs, toolName)
 }
 
 /** 规范化 panic 白名单（只保留绝对路径）。 */
@@ -113,7 +125,8 @@ function panicDenial(exec, allowRoots) {
 /**
  * 一次工具调用的完整墙决策。
  * @param {{ name: string, arguments: unknown, agent?: object }} exec
- * @param {{ engine: import('./rules.js').RulesEngine | null, panic: boolean, allowRoots: string[], borrow: import('./borrow.js').BorrowStore }} state
+ * @param {{ engine: import('./rules.js').RulesEngine | null, panic: boolean, allowRoots: string[], borrow?: import('./borrow.js').BorrowStore | null }} state
+ *   `borrow` 可缺席：缺席即视为“没有借出”，且不会消耗 `once` 借出。
  * @returns {{ decision: 'allow'|'hidden-deny'|'deny'|'borrow-allow'|'panic-deny', tool: string, path?: string, ruleId?: string, reason?: string }}
  */
 export function decideWall(exec, state) {
@@ -134,7 +147,7 @@ export function decideWall(exec, state) {
         if (RECURSIVE_TOOLS.has(tool)) {
           const ancestor = normalizeAbs(candidate.path)
           if (ancestor !== '' && protectedRootUnder(engine, ancestor)) {
-            if (state.borrow.allow(exec.agent, ancestor, tool)) {
+            if (borrowAllow(state, exec.agent, ancestor, tool)) {
               return { decision: 'borrow-allow', tool, path: ancestor }
             }
             return { decision: 'hidden-deny', tool, path: ancestor, reason: hiddenReason(tool, ancestor) }
@@ -142,7 +155,7 @@ export function decideWall(exec, state) {
         }
         continue
       }
-      if (state.borrow.allow(exec.agent, candidate.path, tool)) {
+      if (borrowAllow(state, exec.agent, candidate.path, tool)) {
         return { decision: 'borrow-allow', tool, path: candidate.path, ruleId: entry.id }
       }
       return {
@@ -155,7 +168,7 @@ export function decideWall(exec, state) {
     } else {
       const hit = firstTextHit(engine, tool, candidate.text)
       if (hit !== null) {
-        if (state.borrow.allow(exec.agent, hit.root, tool)) {
+        if (borrowAllow(state, exec.agent, hit.root, tool)) {
           return { decision: 'borrow-allow', tool, path: hit.root, ruleId: hit.entry.id }
         }
         return {
@@ -172,7 +185,7 @@ export function decideWall(exec, state) {
           const ancestor = normalizeAbs(token)
           if (ancestor === '') continue
           if (protectedRootUnder(engine, ancestor)) {
-            if (state.borrow.allow(exec.agent, ancestor, tool)) {
+            if (borrowAllow(state, exec.agent, ancestor, tool)) {
               return { decision: 'borrow-allow', tool, path: ancestor }
             }
             return { decision: 'hidden-deny', tool, path: ancestor, reason: hiddenReason(tool, ancestor) }
@@ -182,4 +195,15 @@ export function decideWall(exec, state) {
     }
   }
   return { decision: 'allow', tool }
+}
+
+/**
+ * 试算决策（v0.3 新增）：与 {@link decideWall} 同一条判定逻辑，但**永不消费借出**——
+ * 显式清掉 `borrow`，因此「如果现在有个新 agent 来碰这个路径，墙会怎么判」可以安全地问出来。
+ * 供 `/wall test` 命令（以及任何只想预览、不想改变状态的调用方）使用。
+ * @param {{ name: string, arguments: unknown, agent?: object }} exec
+ * @param {{ engine: import('./rules.js').RulesEngine | null, panic: boolean, allowRoots: string[] }} state
+ */
+export function probeWall(exec, state) {
+  return decideWall(exec, { ...state, borrow: null })
 }

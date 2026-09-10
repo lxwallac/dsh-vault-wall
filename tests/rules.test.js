@@ -47,6 +47,36 @@ test('引擎：/** 树标记等价于整树', () => {
   assert.ok(engine.matchPath(dir(['vault', 'deep', 'deeper', 'f'])))
 })
 
+test('引擎 v0.3：中段 ** 跨任意层目录（含零层）', () => {
+  const engine = engineWith([{ id: 'env', paths: [dir(['repos', '**', '.env'])] }])
+  assert.ok(engine.matchPath(dir(['repos', '.env'])), '零层：直接子项')
+  assert.ok(engine.matchPath(dir(['repos', 'a', '.env'])), '一层')
+  assert.ok(engine.matchPath(dir(['repos', 'a', 'b', 'c', '.env'])), '多层')
+  assert.equal(engine.matchPath(dir(['repos', 'a', '.env.local'])), null, '尾段需精确匹配')
+  assert.equal(engine.matchPath(dir(['repos', 'a', 'b', '.env', 'nested'])), null, '命中项本身之外不沾亲')
+  assert.equal(engine.matchPath(dir(['repos2', 'a', '.env'])), null, '兄弟目录不误伤')
+
+  // 中段 ** 与段内 * 混用：`**/secrets/*.key`
+  const mixed = engineWith([{ id: 'keys', paths: [dir(['**', 'secrets', '*.key'])] }])
+  assert.ok(mixed.matchPath(dir(['secrets', 'a.key'])))
+  assert.ok(mixed.matchPath(dir(['x', 'y', 'secrets', 'b.key'])))
+  assert.equal(mixed.matchPath(dir(['x', 'secrets', 'nested', 'b.key'])), null, '段内 * 不跨层')
+})
+
+test('引擎 v0.3：中段 ** 的文本前缀仍是首个 * 之前的字面量', () => {
+  const engine = engineWith([{ id: 'env', paths: [dir(['repos', '**', '.env'])] }])
+  const roots = engine.byId.get('env').textRoots()
+  assert.deepEqual(roots, [`${dir(['repos'])}${SEP}`])
+})
+
+test('引擎 v0.3：末尾多打一个分隔符不影响语义（…\\dir\\**\\ 与 …\\dir\\ 都按整树处理）', () => {
+  const trailingDoubleStar = engineWith([{ id: 'a', paths: [`${dir(['vault'])}${SEP}**${SEP}`] }])
+  assert.ok(trailingDoubleStar.matchPath(dir(['vault', 'deep', 'f'])))
+  const trailingPlain = engineWith([{ id: 'b', paths: [`${dir(['vault'])}${SEP}`] }])
+  assert.ok(trailingPlain.matchPath(dir(['vault', 'deep', 'f'])))
+  assert.equal(trailingPlain.matchPath(dir(['vault2', 'f'])), null)
+})
+
 test('引擎：工具白名单过滤', () => {
   const engine = engineWith([
     { id: 'readonly-vault', paths: [dir(['vault'])], tools: ['read', 'glob', 'grep'] },
@@ -75,6 +105,21 @@ test('textMentions: 词边界防误伤（Windows 路径在 win32 下大小写不
   if (process.platform === 'win32') {
     assert.equal(textMentions('dir ' + String.raw`d:\KEYS\sub`, root), true, 'win32 大小写不敏感')
   }
+})
+
+test('textMentions v0.3：容忍分隔符变体（正斜杠 / 转义双反斜杠）', () => {
+  const root = String.raw`D:\keys`
+  // 正斜杠变体：规则写反斜杠，命令里用正斜杠
+  assert.equal(textMentions('cat D:/keys/id_ed25519', root), true)
+  // 转义变体：JSON / 代码字符串里的双反斜杠
+  assert.equal(textMentions(String.raw`read("D:\\keys\\id_ed25519")`, root), true)
+  // 混合变体同样命中
+  assert.equal(textMentions(String.raw`copy D:\\keys/mixed C:\dst`, root), true)
+  // 边界规则仍然生效：兄弟目录/后缀数字不误伤
+  assert.equal(textMentions('cat D:/keys2/id', root), false)
+  assert.equal(textMentions(String.raw`read("D:\\keys2\\id")`, root), false)
+  // 不含该根的文本不命中
+  assert.equal(textMentions('cat D:/other/id', root), false)
 })
 
 test('ci: Windows 折叠大小写，其他平台保持', () => {

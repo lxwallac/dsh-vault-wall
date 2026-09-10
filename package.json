@@ -1,6 +1,6 @@
 {
   "name": "dsh-vault-wall",
-  "version": "0.2.31",
+  "version": "0.3.0",
   "description": "保险区 Vault Wall — 让 DeepSeek Harness 无法感知、无法触碰用户指定敏感路径的隔离墙插件（隔离墙 + 临时借出 + 触碰审计 + 紧急熔断）",
   "license": "MIT",
   "repository": {
@@ -33,7 +33,8 @@
     "browser/**",
     "samples/**",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "dsh": {
     "bundle": {
@@ -51,7 +52,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "test": "node --test tests/rules.test.js tests/classify.test.js tests/borrow.test.js tests/audit.test.js tests/audit-file.test.js tests/wall-core.test.js tests/doc-bridge.test.js"
+    "test": "node --test tests/rules.test.js tests/classify.test.js tests/borrow.test.js tests/audit.test.js tests/audit-file.test.js tests/wall-core.test.js tests/doc-bridge.test.js tests/console.test.js tests/client-bundle.test.js tests/index-wiring.test.js"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",

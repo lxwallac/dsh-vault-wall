@@ -4,7 +4,7 @@
     {
       "id": "personal-vault",
       "mode": "hidden",
-      "note": "个人敏感资料库：DSH 触碰时一律伪装成“不存在”",
+      "note": "个人敏感资料库：DSH 触碰时一律伪装成“不存在”（目录整树 + 单文件混用）",
       "paths": [
         "C:\\Users\\dell\\secret-box",
         "D:\\keys\\id_ed25519"
@@ -13,11 +13,22 @@
     {
       "id": "project-secrets",
       "mode": "hidden",
+      "note": "仓库里的凭据：** 表示任意层目录，于是仓库根与深层子目录的 .env 一起被圈住",
       "paths": [
         "C:\\work\\repo\\.env",
+        "C:\\work\\repo\\**\\.env",
         "C:\\work\\repo\\credentials\\**"
       ],
       "tools": ["read", "read_image", "write", "edit", "glob", "grep", "bash", "pwsh"]
+    },
+    {
+      "id": "archive-readonly",
+      "mode": "deny",
+      "note": "归档只读：拒绝写入/编辑（deny 模式会明确点名规则），但读取不受影响",
+      "paths": [
+        "D:\\archive\\**"
+      ],
+      "tools": ["write", "edit", "str_replace_editor", "bash", "pwsh"]
     }
   ]
 }

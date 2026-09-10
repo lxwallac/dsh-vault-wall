@@ -34,6 +34,20 @@ export class BorrowStore {
     this.maps = []
   }
 
+  /**
+   * agent 必须是对象：WeakMap 以 undefined/原始值为键会抛
+   * `TypeError: Invalid value used as weak map key`（0.2.31 及以前 `/wall borrow add`
+   * 在无 agent 的命令行调用下就是这样崩掉的）。这里改成 fail-loud 的可读错误。
+   * @param {unknown} agent
+   * @param {string} action
+   */
+  static requireAgent(agent, action) {
+    if (agent === undefined || agent === null || (typeof agent !== 'object' && typeof agent !== 'function')) {
+      throw new Error(`vault-wall: borrow ${action} requires an agent context`)
+    }
+    return agent
+  }
+
   _map(agent) {
     let map = this.agents.get(agent)
     if (map === undefined) {
@@ -50,6 +64,7 @@ export class BorrowStore {
    * @param {{path: string, mode?: 'read'|'read-write', kind?: 'once'|'ttl', ttlMs?: number, note?: string}} options
    */
   grant(agent, { path, mode = 'read', kind = 'ttl', ttlMs = 60_000, note } = {}) {
+    BorrowStore.requireAgent(agent, 'grant')
     const abs = normalizeAbs(path)
     if (abs === '') throw new Error('vault-wall: borrow requires an absolute path')
     if (mode !== 'read' && mode !== 'read-write') {

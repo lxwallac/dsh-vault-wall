@@ -82,3 +82,17 @@ test('非法参数 fail-loud', () => {
   assert.throws(() => store.grant(agent, { path: vault, kind: 'x' }), /kind must be/)
   assert.throws(() => store.grant(agent, { path: vault, kind: 'ttl', ttlMs: -1 }), /ttlMs/)
 })
+
+test('v0.3 修复：无 agent 上下文时 grant 抛可读错误（此前是 WeakMap TypeError 崩溃）', () => {
+  const store = new BorrowStore()
+  for (const bad of [undefined, null, 'agent-id', 42]) {
+    assert.throws(
+      () => store.grant(bad, { path: vault, kind: 'ttl', ttlMs: 1000 }),
+      /borrow grant requires an agent context/,
+      `agent=${String(bad)} 应有可读错误`,
+    )
+  }
+  // 只读查询路径不应抛：list/revoke 对无 agent 返回空/false
+  assert.deepEqual(store.list(undefined), [])
+  assert.equal(store.revoke(undefined, 'b1'), false)
+})

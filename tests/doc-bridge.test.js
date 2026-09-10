@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseRulesJson, selfPathsFor, assembleRawDoc } from '../src/doc-bridge.js'
+import path from 'node:path'
+import { parseRulesJson, selfPathsFor, assembleRawDoc, dshHomePath, defaultSettingsDocPath } from '../src/doc-bridge.js'
 
 test('parseRulesJson: 空串视为无规则', () => {
   assert.deepEqual(parseRulesJson(''), [])
@@ -47,4 +48,34 @@ test('assembleRawDoc: 用户规则保序 + 注入 hidden 自保护规则且不�
   // 自保护路径去重
   const dup = assembleRawDoc([], ['C:\\x', 'C:\\x'])
   assert.equal(dup.rules.length, 1)
+})
+
+test('dshHomePath: 复刻宿主解析顺序（$DSH_HOME > ~/.dsh），空白视为未设置', () => {
+  const home = path.join('C:', 'Users', 'demo')
+  assert.equal(dshHomePath({}, home), path.join(home, '.dsh'))
+  assert.equal(dshHomePath({ DSH_HOME: '   ' }, home), path.join(home, '.dsh'))
+  assert.equal(dshHomePath({ DSH_HOME: path.join('D:', 'dsh-home') }, home), path.join('D:', 'dsh-home'))
+  // `~` 前缀展开（宿主 expandHomePath 同语义）
+  assert.equal(dshHomePath({ DSH_HOME: '~/alt' }, home), path.join(home, 'alt'))
+  assert.equal(dshHomePath({ DSH_HOME: '~' }, home), home)
+})
+
+test('defaultSettingsDocPath: 默认落在 <dsh home>/settings.yaml（而不是 <home>/settings.yaml）', () => {
+  const home = path.join('C:', 'Users', 'demo')
+  assert.equal(defaultSettingsDocPath({}, home), path.join(home, '.dsh', 'settings.yaml'))
+  // 0.2.31 的 bug 形状：绝不能再返回主目录根下的 settings.yaml
+  assert.notEqual(defaultSettingsDocPath({}, home), path.join(home, 'settings.yaml'))
+})
+
+test('selfPathsFor: 宿主给出的权威文档路径即使尚不存在也圈禁', () => {
+  const list = selfPathsFor({
+    auditPath: '',
+    settingsDoc: 'C:\\Users\\demo\\.dsh\\settings.yaml',
+    settingsDocExists: false,
+    settingsDocAuthoritative: true,
+  })
+  assert.deepEqual(list, ['C:\\Users\\demo\\.dsh\\settings.yaml'])
+  // 猜测路径（非权威）仍要求文件存在，避免保护一个不存在的假路径
+  const guessed = selfPathsFor({ auditPath: '', settingsDoc: 'C:\\Users\\demo\\.dsh\\settings.yaml', settingsDocExists: false })
+  assert.deepEqual(guessed, [])
 })
