@@ -76,11 +76,16 @@ export function parseRulesJson(text) {
  * @param {boolean} [options.settingsDocAuthoritative] - settingsDoc 是否来自宿主
  *   （`settings.documentPath`）：宿主自己解析过的真实文档路径，即使文件此刻还不存在也圈禁；
  *   而纯猜测的默认路径只在文件确实存在时才圈禁，避免保护一个不存在的假路径。
+ * @param {boolean} [options.historyAuthoritative] - historyPath 是否来自**显式配置**：
+ *   显式配了就圈禁（不管文件当前在不在），否则只在文件存在时圈。
  */
 export function selfPathsFor({
   legacyFile = '',
   legacyExists = false,
   auditPath = '',
+  historyPath = '',
+  historyExists = false,
+  historyAuthoritative = false,
   settingsDoc = '',
   settingsDocExists = false,
   settingsDocAuthoritative = false,
@@ -93,6 +98,8 @@ export function selfPathsFor({
   }
   if (legacyExists && legacyFile !== '') push(legacyFile)
   push(auditPath)
+  // v0.4：规则修订历史里存着规则全文（等于把墙的配置抄了一份），同样不能给 agent 看。
+  if (historyPath !== '' && (historyAuthoritative || historyExists)) push(historyPath)
   // 规则主源在官方设置文档里时，文档本身也要圈禁，防 agent 经工具改文档自改墙。
   if (settingsDoc !== '' && (settingsDocExists || settingsDocAuthoritative)) push(settingsDoc)
   return out

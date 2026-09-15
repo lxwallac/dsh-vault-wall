@@ -14,6 +14,9 @@ import { RulesEngine } from '../src/rules.js'
 import { BorrowStore } from '../src/borrow.js'
 import { AuditRing } from '../src/audit.js'
 import { assembleRawDoc } from '../src/doc-bridge.js'
+import { Metrics } from '../src/metrics.js'
+import { DenialStreaks } from '../src/correct.js'
+import { RuleHistory } from '../src/history.js'
 import { handleWallCommand, splitArgs, syntheticExec } from '../src/console.js'
 
 const base = path.resolve('__vw_console_test_root__')
@@ -27,6 +30,7 @@ function makeState(overrides = {}) {
     { id: 'deny-file', mode: 'deny', paths: [denyFile] },
   ], []))
   const state = {
+    version: '0.4.0',
     engine,
     userRulesArr: [
       { id: 'vault', mode: 'hidden', paths: [vault] },
@@ -40,10 +44,17 @@ function makeState(overrides = {}) {
     allowRoots: [],
     borrow: new BorrowStore(),
     audit: new AuditRing(50, ''),
+    metrics: new Metrics(),
+    streaks: new DenialStreaks({ threshold: 3 }),
+    history: new RuleHistory(),
+    historyFile: '',
+    homeDir: base,
+    behaviour: { onLeak: 'redact', autoPanicOnBypass: true, repeatDenialThreshold: 3, repeatDenialAction: 'notice', askEnabled: true, askBorrowTtlMs: 600000 },
     settingsRead: () => ({ rulesJson: '{"version":1,"rules":[]}' }),
     applyUserRules: (text, label) => { state.applied = { text, label } },
     readLegacyText: () => '{"version":1,"rules":[]}',
     writeFile: (file, text) => { state.written = { file, text } },
+    persistRules: (text) => { state.persisted = text; return { target: 'settings' } },
   }
   return Object.assign(state, overrides)
 }
@@ -245,3 +256,232 @@ test('handler 永不抛出：依赖抛异常也转成错误文本', () => {
   assert.equal(res.kind, 'error')
   assert.match(res.text, /\/wall 内部错误：borrow store broken/)
 })
+
+// ------------------------------------------------------------------ v0.4 新增
+
+test('status: v0.4 增补版本、指标、循环计数、行为开关与历史', () => {
+  const state = makeState()
+  state.metrics.record({ tool: 'read', decision: 'hidden-deny', ruleId: 'vault' })
+  state.metrics.recordApproval('rejected')
+  state.history.record('{"version":1,"rules":[]}', { source: 'settings' })
+  const res = run(state, 'status')
+  assert.equal(res.kind, 'success')
+  assert.match(res.text, /version: 0\.4\.0/)
+  assert.match(res.text, /metrics: calls=1 denied=1 allowed=0/)
+  assert.match(res.text, /ask=1/)
+  assert.match(res.text, /repeat-denials: threshold=3 escalated=0/)
+  assert.match(res.text, /behaviour: onLeak=redact/)
+  assert.match(res.text, /history: 1 revision\(s\)/)
+})
+
+test('rules: ask 规则额外显示 minRisk / remember / borrowTtlMs', () => {
+  const state = makeState()
+  state.userRulesArr = [{ id: 'ask-rule', mode: 'ask', paths: [vault], minRisk: 'medium', remember: true, borrowTtlMs: 60000 }]
+  state.engine = new RulesEngine(assembleRawDoc(state.userRulesArr, []))
+  const res = run(state, 'rules')
+  assert.match(res.text, /mode=ask minRisk=medium remember=true borrowTtlMs=60000/)
+})
+
+test('test: 报告工具风险等级与 ask 行为预告', () => {
+  const state = makeState()
+  state.userRulesArr = [{ id: 'ask-rule', mode: 'ask', paths: [vault] }]
+  state.engine = new RulesEngine(assembleRawDoc(state.userRulesArr, []))
+  const res = run(state, `test "${path.join(vault, 'a.txt')}" write`)
+  assert.equal(res.kind, 'success')
+  assert.match(res.text, /risk: medium/)
+  assert.match(res.text, /decision: ask/)
+  assert.match(res.text, /官方审批通道问人/)
+  assert.match(res.text, /记一条 600000ms 借出/)
+})
+
+test('test: 低风险读在 minRisk=high 之下直接放行（门槛语义）', () => {
+  const state = makeState()
+  state.userRulesArr = [{ id: 'ask-high', mode: 'ask', paths: [vault], minRisk: 'high' }]
+  state.engine = new RulesEngine(assembleRawDoc(state.userRulesArr, []))
+  assert.match(run(state, `test "${path.join(vault, 'a.txt')}" read`).text, /decision: allow/)
+  assert.match(run(state, `test "${path.join(vault, 'a.txt')}" bash`).text, /decision: ask/)
+})
+
+test('decisions: 输出带 risk 字段', () => {
+  const state = makeState()
+  state.audit.push({ tool: 'read', decision: 'hidden-deny', path: vault, ruleId: 'vault', risk: 'low' })
+  assert.match(run(state, 'decisions').text, /risk=low/)
+})
+
+test('report: 汇总拦截/放行/审批/验证与未命中规则', () => {
+  const state = makeState()
+  state.metrics.record({ tool: 'read', decision: 'allow' })
+  state.metrics.record({ tool: 'read', decision: 'hidden-deny', ruleId: 'vault' })
+  state.metrics.record({ tool: 'write', decision: 'ask', ruleId: 'deny-file' })
+  state.metrics.recordApproval('rejected')
+  const res = run(state, 'report')
+  assert.equal(res.kind, 'success')
+  assert.match(res.text, /【约束】/)
+  assert.match(res.text, /【人在回路】/)
+  assert.match(res.text, /问人 1 次：通过 0　人拒 1/)
+  assert.match(res.text, /放行 1 次/)
+  // ask 未被同意也算拦截：没人同意就不能执行
+  assert.match(res.text, /拦截 2 次（66\.7%）/)
+})
+
+test('report: 没有 ask 相关记录时不输出「人在回路」小节', () => {
+  const state = makeState()
+  state.metrics.record({ tool: 'read', decision: 'allow' })
+  assert.equal(run(state, 'report').text.includes('【人在回路】'), false)
+})
+
+test('report: 缺少 metrics 时给出可读错误（旧宿主接线）', () => {
+  const state = makeState({ metrics: undefined })
+  const res = run(state, 'report')
+  assert.equal(res.kind, 'error')
+  assert.match(res.text, /需要 metrics/)
+})
+
+test('lint: 干净规则返回通过，可疑规则逐条列出', () => {
+  // makeState 默认带一条 deny 规则（会触发 deny-reveals 的 info），先验「确有 info 但不报错」
+  const withDeny = run(makeState(), 'lint')
+  assert.equal(withDeny.kind, 'success')
+  assert.match(withDeny.text, /deny-reveals/)
+  assert.match(withDeny.text, /warn 0/)
+
+  const cleanState = makeState()
+  cleanState.userRulesArr = [{ id: 'vault', mode: 'hidden', paths: [vault] }]
+  cleanState.engine = new RulesEngine(assembleRawDoc(cleanState.userRulesArr, []))
+  const clean = run(cleanState, 'lint')
+  assert.equal(clean.kind, 'success')
+  assert.match(clean.text, /规则体检通过/)
+
+  const dirty = makeState({
+    userRulesArr: [{ id: 'wide', mode: 'hidden', paths: [base] }],
+  })
+  const res = run(dirty, 'lint')
+  assert.match(res.text, /规则体检：/)
+  assert.match(res.text, /over-broad/)
+  assert.match(res.text, /\[wide\]/)
+})
+
+test('history: 列出修订（最新在前、标出当前）并在为空时如实说明', () => {
+  const empty = run(makeState(), 'history')
+  assert.match(empty.text, /还没有任何规则修订记录/)
+  const state = makeState()
+  state.history.record('{"version":1,"rules":[]}', { source: 'settings' })
+  state.history.record('{"version":1,"rules":[{"id":"v"}]}', { source: 'settings' })
+  const res = run(state, 'history')
+  assert.match(res.text, /规则修订 2 条/)
+  assert.match(res.text, /\* r2 /)
+  assert.match(res.text, /rollback <id\|last\|prev>/)
+  assert.match(res.text, /仅内存/)
+})
+
+test('history: historyFile 非空时提示落盘路径', () => {
+  const state = makeState({ historyFile: path.join(base, 'rules-history.json') })
+  state.history.record('{}', { source: 'settings' })
+  assert.match(run(state, 'history').text, /落盘 .*rules-history\.json/)
+})
+
+test('snapshot: 导出指定修订全文，默认最新一条', () => {
+  const state = makeState()
+  state.history.record('{"version":1,"rules":[]}', { source: 'settings' })
+  state.history.record('{"version":1,"rules":[{"id":"v"}]}', { source: 'settings' })
+  const target = path.join(workspace, 'revision-1.json')
+  const res = run(state, `snapshot "${target}" r1`)
+  assert.equal(res.kind, 'success')
+  assert.equal(state.written.file, target)
+  assert.equal(JSON.parse(state.written.text).rules.length, 0)
+  assert.match(res.text, /已把修订 r1/)
+  assert.match(run(state, `snapshot "${path.join(workspace, 'latest.json')}"`).text, /已把修订 r2/)
+})
+
+test('snapshot: 空修订写成合法空文档；受保护路径与缺参/缺修订都拒绝', () => {
+  const state = makeState()
+  const target = path.join(workspace, 'empty.json')
+  const res = run(state, `snapshot "${target}"`)
+  assert.equal(res.kind, 'error')
+  assert.match(res.text, /没有找到修订/)
+  state.history.record('', { source: 'settings' })
+  assert.equal(run(state, `snapshot "${target}"`).kind, 'success')
+  assert.deepEqual(JSON.parse(state.written.text), { version: 1, rules: [] })
+  const refused = run(state, `snapshot "${path.join(vault, 'x.json')}"`)
+  assert.equal(refused.kind, 'error')
+  assert.match(refused.text, /拒绝导出修订到受保护路径/)
+  assert.match(run(state, 'snapshot').text, /Usage: \/wall snapshot/)
+  assert.match(run(state, 'snapshot relative.json').text, /需要绝对路径/)
+})
+
+test('snapshot: 写失败转成错误文本', () => {
+  const state = makeState({ writeFile: () => { throw new Error('EACCES: denied') } })
+  state.history.record('{}', { source: 'settings' })
+  const res = run(state, `snapshot "${path.join(workspace, 'x.json')}"`)
+  assert.equal(res.kind, 'error')
+  assert.match(res.text, /写出失败：EACCES/)
+})
+
+test('rollback: 应用旧修订并写回规则源，同时记为一条新修订', () => {
+  const state = makeState()
+  state.history.record('{"version":1,"rules":[]}', { source: 'settings' })
+  state.history.record('{"version":1,"rules":[{"id":"v"}]}', { source: 'settings' })
+  const res = run(state, 'rollback prev')
+  assert.equal(res.kind, 'success')
+  assert.equal(state.applied.label, 'rollback')
+  assert.equal(state.applied.text, '{"version":1,"rules":[]}')
+  assert.equal(state.persisted, '{"version":1,"rules":[]}')
+  assert.match(res.text, /已回滚到修订 r1/)
+  assert.match(res.text, /已写回设置文档/)
+  assert.equal(state.audit.items[0].decision, 'rules-rollback')
+})
+
+test('rollback: 目标就是当前版本时不做任何事', () => {
+  const state = makeState()
+  state.history.record('{}', { source: 'settings' })
+  const res = run(state, 'rollback last')
+  assert.equal(res.kind, 'success')
+  assert.match(res.text, /无需回滚/)
+  assert.equal(state.persisted, undefined)
+})
+
+test('rollback: 旧修订校验失败时报错且不写回', () => {
+  const state = makeState({
+    applyUserRules: (text, label) => { state.applied = { text, label }; state.lastError = '规则 0 需要 id' },
+  })
+  state.history.record('broken', { source: 'settings' })
+  state.history.record('{"version":1,"rules":[]}', { source: 'settings' })
+  const res = run(state, 'rollback r1')
+  assert.equal(res.kind, 'error')
+  assert.match(res.text, /回滚失败/)
+  assert.match(res.text, /规则 0 需要 id/)
+  assert.equal(state.persisted, undefined)
+})
+
+test('rollback: 规则源不可写时明说「只改了内存，重启会回去」', () => {
+  const state = makeState({ persistRules: () => ({ target: 'none' }) })
+  state.history.record('a', { source: 's' })
+  state.history.record('b', { source: 's' })
+  const res = run(state, 'rollback r1')
+  assert.match(res.text, /只改了内存/)
+  assert.match(res.text, /重启后会回到旧规则/)
+
+  const failed = makeState({ persistRules: () => ({ target: 'failed', error: 'EACCES' }) })
+  failed.history.record('a', { source: 's' })
+  failed.history.record('b', { source: 's' })
+  assert.match(run(failed, 'rollback last').text, /无需回滚/)
+  assert.match(run(failed, 'rollback r1').text, /写回规则源失败/)
+})
+
+test('rollback: 找不到修订时给出可用清单提示', () => {
+  const state = makeState()
+  state.history.record('{}', { source: 'settings' })
+  const res = run(state, 'rollback r99')
+  assert.equal(res.kind, 'error')
+  assert.match(res.text, /没有找到修订 "r99"/)
+  assert.match(res.text, /\/wall history/)
+})
+
+test('history/snapshot/rollback: 缺少 history 门面时报错而不是崩溃', () => {
+  const state = makeState({ history: undefined })
+  for (const command of ['history', 'rollback', `snapshot "${path.join(workspace, 'x.json')}"`]) {
+    const res = run(state, command)
+    assert.equal(res.kind, 'error', command)
+    assert.match(res.text, /需要 history/)
+  }
+})
+

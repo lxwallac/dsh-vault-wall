@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { RulesEngine, normalizeAbs, insideOrEqual, textMentions, ci } from '../src/rules.js'
 
 const SEP = path.sep
@@ -125,4 +127,21 @@ test('textMentions v0.3：容忍分隔符变体（正斜杠 / 转义双反斜杠
 test('ci: Windows 折叠大小写，其他平台保持', () => {
   if (process.platform === 'win32') assert.equal(ci('A\\B'), ci('a\\b'))
   else assert.notEqual(ci('A'), ci('a'))
+})
+
+test('样例规则文件必须真的能被引擎接受（文档不会烂掉）', () => {
+  const file = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'samples', 'rules.example.json')
+  const doc = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(doc.version, 1)
+  // 逐条先按「纯用户规则」校验（与设置页保存前的口径一致），再交给完整引擎
+  const engine = new RulesEngine({ version: 1, rules: doc.rules })
+  assert.equal(engine.size, doc.rules.length)
+  const modes = new Set(doc.rules.map((rule) => rule.mode))
+  for (const mode of modes) assert.ok(['hidden', 'deny', 'ask'].includes(mode), mode)
+  // 样例要覆盖到 v0.4 的三档模式与 ask 专属字段，否则文档示例会落后于功能
+  assert.ok(modes.has('ask'), '样例里应有 ask 示例')
+  const askRule = doc.rules.find((rule) => rule.mode === 'ask')
+  assert.equal(typeof askRule.minRisk, 'string')
+  assert.equal(typeof askRule.remember, 'boolean')
+  assert.ok(doc.rules.some((rule) => rule.mode === 'ask' && (rule.remember === false || rule.borrowTtlMs === 0)), '应有「一次一授权」示例')
 })

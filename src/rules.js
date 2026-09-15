@@ -11,9 +11,15 @@
  *  - 匹配是纯词法 + path.relative 包含判断，不做 fs 访问（避免 TOCTOU 与 I/O 开销）；
  *    符号链接别名不在 v1 能力内。
  *  - Windows 上路径大小写不敏感；分隔符统一为平台分隔符后再比较。
+ *
+ * v0.4 起 `mode` 增加第三种取值 `ask`（人在回路，见 README「护栏」）：
+ * 命中后不直接拒绝，而是先经官方审批通道问人；据此规则可再带三个 ask 专属字段
+ * （`minRisk` / `remember` / `borrowTtlMs`）。它们出现在非 ask 规则上一律 fail-loud，
+ * 免得「写了却不起作用」被静默吞掉。
  */
 
 import path from 'node:path'
+import { RISK_LEVELS } from './risk.js'
 
 const SEP = path.sep
 
@@ -129,20 +135,26 @@ export function compileSpec(spec) {
   return { kind: 'path', abs }
 }
 
+/** 单条规则允许的 mode 取值。 */
+export const RULE_MODES = ['hidden', 'deny', 'ask']
+
+/** ask 规则的默认借出时长：审批通过后同一 agent 在该路径树内 10 分钟不再反复弹窗。 */
+export const DEFAULT_ASK_BORROW_TTL_MS = 10 * 60 * 1000
+
 /** 编译后的单条规则。 */
 function compileRule(rule, index) {
   if (rule === null || typeof rule !== 'object' || Array.isArray(rule)) {
     throw new Error(`vault-wall: rule #${index} must be an object`)
   }
-  const { id, paths, mode = 'hidden', tools, note } = rule
+  const { id, paths, mode = 'hidden', tools, note, minRisk, remember, borrowTtlMs } = rule
   if (typeof id !== 'string' || id.length === 0) {
     throw new Error(`vault-wall: rule #${index} requires a non-empty string \`id\``)
   }
   if (!Array.isArray(paths) || paths.length === 0) {
     throw new Error(`vault-wall: rule ${JSON.stringify(id)} requires a non-empty \`paths\` array`)
   }
-  if (mode !== 'hidden' && mode !== 'deny') {
-    throw new Error(`vault-wall: rule ${JSON.stringify(id)}: mode must be \`hidden\` or \`deny\`, got ${JSON.stringify(mode)}`)
+  if (!RULE_MODES.includes(mode)) {
+    throw new Error(`vault-wall: rule ${JSON.stringify(id)}: mode must be one of ${RULE_MODES.map((m) => `\`${m}\``).join(' / ')}, got ${JSON.stringify(mode)}`)
   }
   let toolSet
   if (tools !== undefined) {
@@ -151,12 +163,40 @@ function compileRule(rule, index) {
     }
     toolSet = new Set(tools)
   }
+
+  // ---- ask 专属字段：写在 hidden/deny 上不会起作用，所以宁可报错也不静默忽略 ----
+  const isAsk = mode === 'ask'
+  if (!isAsk && minRisk !== undefined) {
+    throw new Error(`vault-wall: rule ${JSON.stringify(id)}: \`minRisk\` only applies to mode \`ask\` (got mode ${JSON.stringify(mode)})`)
+  }
+  if (!isAsk && remember !== undefined) {
+    throw new Error(`vault-wall: rule ${JSON.stringify(id)}: \`remember\` only applies to mode \`ask\` (got mode ${JSON.stringify(mode)})`)
+  }
+  if (!isAsk && borrowTtlMs !== undefined) {
+    throw new Error(`vault-wall: rule ${JSON.stringify(id)}: \`borrowTtlMs\` only applies to mode \`ask\` (got mode ${JSON.stringify(mode)})`)
+  }
+  if (minRisk !== undefined && !RISK_LEVELS.includes(minRisk)) {
+    throw new Error(`vault-wall: rule ${JSON.stringify(id)}: minRisk must be one of ${RISK_LEVELS.join(' / ')}, got ${JSON.stringify(minRisk)}`)
+  }
+  if (remember !== undefined && typeof remember !== 'boolean') {
+    throw new Error(`vault-wall: rule ${JSON.stringify(id)}: remember must be a boolean, got ${JSON.stringify(remember)}`)
+  }
+  if (borrowTtlMs !== undefined && (!Number.isFinite(borrowTtlMs) || borrowTtlMs < 0)) {
+    throw new Error(`vault-wall: rule ${JSON.stringify(id)}: borrowTtlMs must be a non-negative number, got ${JSON.stringify(borrowTtlMs)}`)
+  }
+
   const specs = paths.map((p) => compileSpec(p))
   return {
     id,
     note: typeof note === 'string' ? note : undefined,
     mode,
     toolSet,
+    /** 工具风险门槛（仅 ask）：风险低于它就直接放行、不问人。默认 `low`＝一律问。 */
+    minRisk: isAsk ? (minRisk ?? 'low') : undefined,
+    /** 审批通过后是否记一条借出、避免同一路径反复弹窗（仅 ask）。默认 true。 */
+    remember: isAsk ? (remember ?? true) : undefined,
+    /** 审批通过后借出的存活时长（仅 ask，ms）。`0` 表示一次一授权（不记借出）。 */
+    borrowTtlMs: isAsk ? (borrowTtlMs ?? DEFAULT_ASK_BORROW_TTL_MS) : undefined,
     specs,
     match(targetAbs) {
       const t = normalizeAbs(targetAbs)

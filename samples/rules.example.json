@@ -29,6 +29,28 @@
         "D:\\archive\\**"
       ],
       "tools": ["write", "edit", "str_replace_editor", "bash", "pwsh"]
+    },
+    {
+      "id": "keys-ask",
+      "mode": "ask",
+      "note": "v0.4 人在回路：命中后先弹出确认框（路径 + 规则 + 工具 + 风险）。minRisk=medium 表示只读访问不打扰我、写入/执行才问；remember + borrowTtlMs 表示同意一次后这条路径 10 分钟内不再重复询问（同目录其它文件仍会问，要授权整棵目录用 /wall borrow add D:\\keys）。",
+      "paths": [
+        "D:\\keys"
+      ],
+      "minRisk": "medium",
+      "remember": true,
+      "borrowTtlMs": 600000
+    },
+    {
+      "id": "wallet-write-only",
+      "mode": "ask",
+      "note": "只要写：任何写入/执行都要我点头，且不记借出（remember=false → 每次触碰都单独确认）",
+      "paths": [
+        "C:\\Users\\dell\\wallet"
+      ],
+      "minRisk": "medium",
+      "remember": false,
+      "tools": ["write", "edit", "str_replace_editor", "bash", "pwsh", "run_code", "cordis_define"]
     }
   ]
 }

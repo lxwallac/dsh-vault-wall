@@ -36,6 +36,10 @@ export class AuditRing {
       ...(entry.agentLabel !== undefined ? { agentLabel: entry.agentLabel } : {}),
       ...(entry.path !== undefined ? { path: entry.path } : {}),
       ...(entry.ruleId !== undefined ? { ruleId: entry.ruleId } : {}),
+      // v0.4：风险等级与审批结果一起落进审计 —— 事后回看「当时凭什么放行」时，
+      // 这两项比决策名更有信息量（`/wall decisions` 直接展示）。
+      ...(entry.risk !== undefined ? { risk: entry.risk } : {}),
+      ...(entry.approval !== undefined ? { approval: entry.approval } : {}),
       ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
     }
     this.items.push(record)

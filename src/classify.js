@@ -29,6 +29,18 @@ const CODE_FIELDS = {
   cordis_define: [['code', 'host'], ['code', 'client']],
 }
 
+/**
+ * 本插件**看得见形状**的全部工具名（`tools` 限定写别的名字等于永不命中）。
+ * 供 `/wall lint` 提醒「你以为限定了工具，其实那条限定永远不会命中」。
+ */
+export const COVERED_TOOLS = new Set([
+  ...FILE_PATH_TOOLS,
+  ...PATH_ARG_TOOLS,
+  ...SEARCH_ROOT_TOOLS,
+  ...COMMAND_TOOLS,
+  ...CODE_TOOLS,
+])
+
 /** 读取 record 上的一条字段路径；非字符串返回 undefined。 */
 function readStringField(record, fieldPath) {
   let node = record

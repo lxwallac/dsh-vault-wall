@@ -79,10 +79,28 @@ window.__ModuleLoader__.load({
         dot: tok.error,
         desc: '直接报错并注明该处受规则保护：agent 会知道自己不该碰这里。',
       },
+      ask: {
+        tag: '询问',
+        dot: tok.warn,
+        desc: '先请你在界面上确认，而不是直接拒绝；同意后按「记住 / 借出时长」记一条临时借出，无人可问时 fail-closed 成明确拒绝。',
+      },
     }
 
-    // 规则可限定工具（引擎按 exec 工具名匹配）。
-    var TOOL_OPTIONS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh']
+    // ask 专属字段的中文短标签 + 悬停长说明。长说明与宿主 src/risk.js 的 describeRisk 逐字一致，
+    // 但这里必须内联：浏览器半是零构建独立 bundle，不引 src/。
+    var RISK_OPTIONS = [
+      { value: 'low', tag: '低', desc: '只读/只发现：观察世界，不改变世界' },
+      { value: 'medium', tag: '中', desc: '改变内容：写入/原地替换，可逆性一般' },
+      { value: 'high', tag: '高', desc: '任意执行/不可逆：shell、代码执行、删除或移动' },
+      { value: 'unknown', tag: '未识别', desc: '未识别工具：按最保守处理（第三方/MCP 默认从严）' },
+    ]
+    var RISK_VALUES = RISK_OPTIONS.map(function (option) { return option.value })
+    /** 借出时长默认 600 秒＝10 分钟（与宿主 DEFAULT_ASK_BORROW_TTL_MS 同值）。 */
+    var DEFAULT_BORROW_TTL_SECONDS = 600
+
+    // 规则可限定工具（引擎按 exec 工具名匹配）。工具名取自宿主 src/classify.js 的 COVERED_TOOLS
+    // —— 引擎看不见形状的工具名写进 tools 等于永不命中，所以这里只列它认得全的那些。
+    var TOOL_OPTIONS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'str_replace_editor', 'run_code', 'cordis_define']
 
     // ---- 弹窗表单双栏行（标签左、控件右） ----
     var vwDialogClass = 'vw-wall-dialog'
@@ -206,10 +224,14 @@ window.__ModuleLoader__.load({
     /** 浏览器所在平台是否 Windows（用于判定“绝对路径”的形态）。 */
     function isWindowsHost() {
       try {
-        var p = (typeof navigator !== 'undefined' && (navigator.platform || navigator.userAgent)) || ''
+        // 拿不到 UA 就按 Windows 判（本插件主战场是 DSH Desktop/web on Windows）：
+        // 若此时误判成 POSIX，界面会把 C:\... 当成非法路径而拒绝保存。
+        if (typeof navigator === 'undefined') return true
+        var p = navigator.platform || navigator.userAgent || ''
+        if (String(p) === '') return true
         return /win/i.test(String(p))
       } catch (e) {
-        return true // 拿不到就按 Windows 判（本插件主战场是 DSH Desktop/web on Windows）
+        return true
       }
     }
 
@@ -237,6 +259,14 @@ window.__ModuleLoader__.load({
       return null
     }
 
+    /** 已存规则的借出时长（ms）→ 秒输入框初值；缺失/非法时回落到默认 600 秒。 */
+    function borrowSecondsOf(rule) {
+      if (rule && typeof rule.borrowTtlMs === 'number' && isFinite(rule.borrowTtlMs) && rule.borrowTtlMs >= 0) {
+        return String(rule.borrowTtlMs / 1000)
+      }
+      return String(DEFAULT_BORROW_TTL_SECONDS)
+    }
+
     function validateRules(rules) {
       var seen = new Set()
       for (var i = 0; i < rules.length; i += 1) {
@@ -244,7 +274,9 @@ window.__ModuleLoader__.load({
         if (typeof rule.id !== 'string' || rule.id.trim() === '') return '第 ' + (i + 1) + ' 条缺少 id'
         if (seen.has(rule.id)) return 'id 重复：' + rule.id
         seen.add(rule.id)
-        if (rule.mode !== 'hidden' && rule.mode !== 'deny') return '规则 ' + rule.id + ' 的 mode 只能是 hidden 或 deny'
+        if (rule.mode !== 'hidden' && rule.mode !== 'deny' && rule.mode !== 'ask') {
+          return '规则 ' + rule.id + ' 的 mode 只能是 hidden / deny / ask'
+        }
         var paths = Array.isArray(rule.paths) ? rule.paths : []
         if (paths.length === 0 || paths.some(function (p) { return typeof p !== 'string' || p.trim() === '' })) {
           return '规则 ' + rule.id + ' 至少需要一个非空路径'
@@ -259,6 +291,23 @@ window.__ModuleLoader__.load({
           if (!Array.isArray(rule.tools) || rule.tools.length === 0 || rule.tools.some(function (t) { return typeof t !== 'string' || t.trim() === '' })) {
             return '规则 ' + rule.id + ' 的 tools 必须是非空字符串数组'
           }
+        }
+        // v0.4：ask 专属字段只对 mode=ask 生效。写在 hidden/deny 上会被宿主引擎 fail-loud 拒绝，
+        // 这里先拦下——否则页面显示「已保存」，引擎却拒绝重建、继续用上一份规则。
+        var askFields = ['minRisk', 'remember', 'borrowTtlMs']
+        for (var f = 0; f < askFields.length; f += 1) {
+          if (rule[askFields[f]] !== undefined && rule.mode !== 'ask') {
+            return '规则 ' + rule.id + ' 的 ' + askFields[f] + ' 只适用于 mode=ask（当前 ' + JSON.stringify(rule.mode) + '）'
+          }
+        }
+        if (rule.minRisk !== undefined && RISK_VALUES.indexOf(rule.minRisk) === -1) {
+          return '规则 ' + rule.id + ' 的 minRisk 只能是 low / medium / high / unknown，当前 ' + JSON.stringify(rule.minRisk)
+        }
+        if (rule.remember !== undefined && typeof rule.remember !== 'boolean') {
+          return '规则 ' + rule.id + ' 的 remember 必须是布尔值，当前 ' + JSON.stringify(rule.remember)
+        }
+        if (rule.borrowTtlMs !== undefined && (typeof rule.borrowTtlMs !== 'number' || !isFinite(rule.borrowTtlMs) || rule.borrowTtlMs < 0)) {
+          return '规则 ' + rule.id + ' 的 borrowTtlMs 必须是非负数字（毫秒），当前 ' + JSON.stringify(rule.borrowTtlMs)
         }
       }
       return null
@@ -295,9 +344,20 @@ window.__ModuleLoader__.load({
       var idState = useState(initial && initial.id ? initial.id : '')
       var id = idState[0]
       var setId = idState[1]
-      var modeState = useState(initial && initial.mode === 'deny' ? 'deny' : 'hidden')
+      var initialMode = initial && (initial.mode === 'deny' || initial.mode === 'ask') ? initial.mode : 'hidden'
+      var modeState = useState(initialMode)
       var mode = modeState[0]
       var setMode = modeState[1]
+      // ask 专属字段：仅 mode=ask 时渲染与写出（见宿主 src/rules.js 的 fail-loud 校验）。
+      var minRiskState = useState(initial && RISK_VALUES.indexOf(initial.minRisk) !== -1 ? initial.minRisk : 'low')
+      var minRisk = minRiskState[0]
+      var setMinRisk = minRiskState[1]
+      var rememberState = useState(!(initial && initial.remember === false))
+      var remember = rememberState[0]
+      var setRemember = rememberState[1]
+      var ttlInputState = useState(borrowSecondsOf(initial))
+      var ttlInput = ttlInputState[0]
+      var setTtlInput = ttlInputState[1]
       var pathsState = useState(Array.isArray(initial && initial.paths) ? initial.paths.slice() : [])
       var paths = pathsState[0]
       var setPaths = pathsState[1]
@@ -497,6 +557,20 @@ window.__ModuleLoader__.load({
           if (toolsSel.length === 0) { setErr('请至少勾选一个工具，或改回「全部」'); return }
           rule.tools = toolsSel.slice()
         }
+        // ask 专属字段：只对 ask 写出；hidden/deny 上必须完全不出现（宿主会 fail-loud）。
+        if (mode === 'ask') {
+          rule.minRisk = minRisk
+          rule.remember = remember
+          if (remember) {
+            var ttlText = String(ttlInput ?? '').trim()
+            var ttlSeconds = ttlText === '' ? NaN : Number(ttlText)
+            if (!isFinite(ttlSeconds) || ttlSeconds < 0) {
+              setErr('借出时长必须是非负数字（秒）：' + ttlText)
+              return
+            }
+            rule.borrowTtlMs = Math.round(ttlSeconds * 1000)
+          }
+        }
         if (note.trim() !== '') rule.note = note.trim()
         props.onSave(rule)
       }
@@ -531,6 +605,7 @@ window.__ModuleLoader__.load({
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', position: 'relative' } },
               h(Pill, { active: mode === 'hidden', onClick: function () { setMode('hidden'); setErr(null) } }, '隐藏'),
               h(Pill, { active: mode === 'deny', onClick: function () { setMode('deny'); setErr(null) } }, '拒绝'),
+              h(Pill, { active: mode === 'ask', onClick: function () { setMode('ask'); setErr(null) } }, '询问'),
               h('button', {
                 type: 'button',
                 'aria-label': '查看模式说明',
@@ -543,6 +618,47 @@ window.__ModuleLoader__.load({
               tipOpen && MODE_META[mode]
                 ? h('div', { style: { position: 'absolute', top: 'calc(100% + 6px)', left: 0, zIndex: 20, maxWidth: 360, padding: '6px 10px', borderRadius: 6, background: 'var(--dsw-alias-label-primary)', color: 'var(--dsw-alias-bg-layer-3)', fontSize: 12, lineHeight: '18px', boxShadow: '0 4px 14px rgba(0, 0, 0, 0.18)' } }, MODE_META[mode].desc)
                 : null))),
+        mode === 'ask'
+          ? h('div', { style: fieldRowStyle() },
+              h('div', { style: fieldLabelStyle() }, '审批'),
+              h('div', { style: rightCol },
+                h('div', { style: fieldWrap },
+                  h('p', { style: labelStyle }, '最低风险'),
+                  h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+                    RISK_OPTIONS.map(function (option) {
+                      return h(Pill, {
+                        key: option.value,
+                        active: minRisk === option.value,
+                        title: option.desc,
+                        onClick: function () { setMinRisk(option.value); setErr(null) },
+                      }, option.tag)
+                    }),
+                    h('span', { style: { fontSize: 11, lineHeight: '16px', color: tok.text3 } },
+                      '低于该等级的工具调用直接放行，不询问'))),
+                h('div', { style: fieldWrap },
+                  h('p', { style: labelStyle }, '记住'),
+                  h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+                    h('button', {
+                      type: 'button',
+                      'aria-label': '记住这次授权',
+                      onClick: function () { setRemember(!remember); setErr(null) },
+                      style: toolSwitchStyle(remember),
+                    }, h('span', { style: toolKnobStyle(remember) })),
+                    h('span', { style: { fontSize: 11, lineHeight: '16px', color: tok.text3 } },
+                      remember ? '同意一次后记一条临时借出，同一路径不再反复询问' : '每次触碰都要重新确认'))),
+                remember
+                  ? h('div', { style: fieldWrap },
+                      h('p', { style: labelStyle }, '借出时长（秒）'),
+                      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+                        h(Input, {
+                          value: ttlInput,
+                          onChange: function (e) { setTtlInput(e.target.value); setErr(null) },
+                          style: { width: 120 },
+                        }),
+                        h('span', { style: { fontSize: 11, lineHeight: '16px', color: tok.text3 } },
+                          '默认 600 秒＝10 分钟；填 0 表示一次一授权')))
+                  : null))
+          : null,
         h('div', { style: fieldRowStyle() },
           h('div', { style: fieldLabelStyle() }, '路径'),
           h('div', { style: rightCol },

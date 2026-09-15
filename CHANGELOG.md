@@ -2,6 +2,86 @@
 
 版本号遵循语义化版本；`0.2.x` 的历史细节见 git 提交记录（`git log --oneline`）。
 
+## v0.4.0
+
+按《AI Agent 入门》第一章的 Harness 模型（`约束 / 验证 / 纠正` + 工具风险评级 + 人在回路）
+补齐护栏的后半段。v0.3 的墙只会「拦」，v0.4 会**问人、事后核对、纠正循环、并且改得回来**。
+
+### 新增内容
+
+- **询问模式 `mode: "ask"`（人在回路）**
+  命中后不直接拒绝，而是通过官方审批通道（`ctx.get('approval')`）弹出确认框，把「路径 + 规则 id +
+  工具 + 风险等级 + 规则备注」摆给用户；只有 `allowed-once` 才放行。复核来自**上下文之外**的用户，
+  而不是问模型自己。
+  - 三种「没通过」各有独立文案且都要求**不要重试**：人拒绝 / 取消 / 无可用审批通道；
+  - 通道缺失、通道抛错、无 agent 上下文一律 **fail-closed** 成明确拒绝（绝不静默放行）；
+  - 事后兜底：`ask` 决策若未在审批台账里留下同意记录（门没挂上/内部异常/被绕过 pre-execute），
+    guard 一律按「没人问过」拒绝。
+  - 实现取舍：**没有**改走宿主的 `{kind:'ask'}`（`dsh-tools` 的 `serviceAsk`）。那条路径在用户
+    同意后返回 `allow` 并继续咨询单调 guard，而 guard 对同一条 ask 规则仍会判 `ask`，
+    等于用户刚点的「允许」被自己的墙否掉；因此审批在 pre-execute 门里自己做，并在 guard 之前把
+    同意写进按 exec 记账的审批台账。
+- **`minRisk` / `remember` / `borrowTtlMs`（仅 ask 规则）**
+  风险门槛（低于门槛的工具调用直接放行，不打扰人）、同意后记一条 TTL 借出（默认 10 分钟）、
+  借出时长（`0` = 一次一授权）。**借出只覆盖被批准的那一条路径**——同意读一个文件不等于同意整棵树；
+  要目录级授权用 `/wall borrow add <目录>`（弹窗文案里明确告知）。写在非 ask 规则上会 fail-loud。
+- **工具风险评级 `src/risk.js`**：`low`（只读）/ `medium`（写入）/ `high`（任意执行、不可逆），
+  **未识别工具 = `unknown`，秩高于 `high`**（第三方/MCP 默认从严，故障安全默认值）。
+- **执行后验证 `src/verify.js`（`tools/post-execute`）**
+  1. **授权一致性校验（结构化，可信）**：比对 guard/审批门**当时真正做出的决策**与执行结果——
+     判了拒绝却执行成功即 `verify-bypass`，扣下结果、记审计；`autoPanicOnBypass`（默认开）顺手熔断。
+     这条正好补上 v0.3 唯一的 fail-open 缺口（guard 内部异常时放行）；
+  2. **泄漏扫描（文本启发式，尽力而为）**：结果里出现受保护根时按 `onLeak` 处理——`redact`（默认，
+     **整条路径**一起脱敏，不漏文件名）/ `audit` / `block`。已授权的路径不算泄漏。
+- **循环纠正 `src/correct.js`**：同一 agent × 同一规则 × 同一路径的重复触墙计数（默认 3 次，
+  5 分钟窗口）触发纠正——guard 的拒绝文案追加「这是策略决定、不是临时故障、别再重试、去告诉用户」，
+  `tools/post-execute` 把该次结果整条换成纠正文案（可选 `repeatDenialAction: 'panic'` 直接熔断）。
+  收到新的用户消息即清零（与官方 repeat-tool-reminder 同一取舍）。
+- **护栏评估 `/wall report`**：一页给出拦截/放行与占比、判决分布、审批结果、bypass 与泄漏、
+  重复触墙排行、从未命中的规则、规则修订、生效配置，并给出建议动作。
+- **规则体检 `/wall lint`**：过宽（覆盖主目录）、被前一条同模式规则遮蔽、路径不存在、重复路径、
+  中段 `**` 的已知边界、`tools` 里写了引擎看不见形状的工具名、`deny` 会暴露墙的存在、
+  ask 的通道/门槛/remember——逐条结论（warn/info）与建议。
+- **可回滚的规则修订 `/wall history` / `snapshot` / `rollback`**
+  每次成功应用规则都记一条修订（内容相同去重，只增不改），`historyFile` 可落盘跨重启保留；
+  回滚会**写回规则源**（settings 命名空间或规则文件）并在写不回去时明确说「只改了内存，重启会回到
+  旧规则」，回滚本身也记为新修订。
+- **`/wall test` / `status` / `decisions` 增补**：试算打印风险等级与 ask 行为预告；状态页显示版本、
+  指标、循环计数、行为开关、历史；决策列表带 `risk=`。
+- **设置页 UI（`browser/client.js`）**：新增「询问」模式药丸与 ask 专属表单行（最低风险 / 记住 /
+  借出时长），校验与宿主引擎口径对齐（非 ask 规则带上 ask 字段会被页面拦下）；工具清单补齐
+  `str_replace_editor` / `run_code` / `cordis_define`。
+- **`npm run test:local`**：`node --test` 会为每个测试文件 fork 子进程，在受限环境（文件沙箱、
+  部分容器/CI）会被 `spawn EPERM` 拒绝；这个脚本用 `node:test` 的编程式 `run()` 在同一进程内
+  顺序执行同一份清单，作为等价通道。
+- **测试从 81 个增加到 204 个**：新增 `tests/risk|ask|verify|correct|metrics|history|report.test.js`，
+  并扩充 `rules` / `borrow` / `wall-core` / `console` / `client-bundle` / `index-wiring`
+  （含「VERSION 必须等于 package.json version」这条发版栅栏）。客户端测试新增探针渲染：
+  直接渲染规则编辑弹窗，断言 ask 行出现、保存时只写 ask 字段。
+
+### 修复的 Bug
+
+- **脱敏只换掉了根路径，文件名仍然泄漏**：规则 `D:\keys` 命中结果里的 `D:\keys\id_ed25519` 时，
+  旧实现只替换 `D:\keys`，留下 `\id_ed25519`。现在整条路径 token 一起脱敏。
+- **已授权路径被自己判成泄漏**：同意读取 `D:\keys\id_rsa` 后，结果里出现该路径会被泄漏扫描命中并被
+  脱敏（等于把刚批准的内容抹掉）。授权判定现在两个方向都算授权。
+- **无 settings 服务时墙有 60 秒的「无规则」窗口**：`apply()` 早先把旧规则文件的回退放在 watchdog
+  的 60s 截止处，期间 `engine === null` 而 guard 对所有路径放行。现在 settings 服务缺席时当轮即用
+  旧规则文件兜底。
+- **审计丢失 `risk` 字段**：`AuditRing.push` 只保留白名单字段，`/wall decisions` 读到的 `risk`
+  永远为空。现在 `risk` 与 `approval` 一并落审计。
+- **`isWindowsHost()` 与注释不符**：注释说「拿不到 UA 就按 Windows 判」，实现却会返回 `false`，
+  导致无 `navigator` 的环境把 `C:\...` 判成非法路径。
+
+### 兼容性
+
+- `version: 1` 规则文档格式**向后兼容**：v0.3 的 `hidden` / `deny` 规则照常工作，`ask` 与三个新字段
+  是可选项；v0.3 写的规则文件、settings 文档无需迁移。
+- 行为变化（有意为之）：未识别工具的风险按 `unknown`（高于 `high`）计入 ask 门槛与报告；
+  新增的 `tools/pre-execute`、`tools/post-execute`、`agent/pre-step` 三个监听器在默认配置下即生效。
+  不需要验证/纠正时可关：`onLeak: 'audit'`、`autoPanicOnBypass: false`、
+  `repeatDenialThreshold: 0`、`askEnabled: false`。
+
 ## v0.3.0
 
 ### 修复的 Bug

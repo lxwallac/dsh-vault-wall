@@ -94,21 +94,27 @@ export class BorrowStore {
   /**
    * 放行判定：命中 agent 的一条活跃借出则返回 true；`once` 借出会被消耗。
    * 顺带惰性清理过期与已消耗的条目。
+   *
+   * v0.4：`options.consume === false` 是**试算模式**——只回答「如果现在放行，会不会消耗
+   * 一次借出」，既不消耗 `once`、也不清理过期项，因此可安全地被同一调用的多个阶段
+   * （pre-execute 审批门 → guard → post-execute 验证）重复调用而只消耗一次。
    * @param {object | undefined} agent
    * @param {string} targetAbs
    * @param {string} toolName
+   * @param {{consume?: boolean}} [options]
    */
-  allow(agent, targetAbs, toolName) {
+  allow(agent, targetAbs, toolName, { consume = true } = {}) {
     if (agent === undefined || agent === null) return false
-    const map = this._map(agent)
-    if (map.size === 0) return false
+    const map = this.agents.get(agent)
+    if (map === undefined || map.size === 0) return false
     const now = this.now()
     for (const [id, grant] of [...map]) {
-      if (grant.kind === 'ttl' && grant.expiresAt <= now) {
-        map.delete(id)
-        continue
-      }
-      if (grant.used) {
+      const expired = grant.kind === 'ttl' && grant.expiresAt <= now
+      // 试算模式不写状态：过期项留着（真实放行时再清），否则同一次调用的后续阶段
+      // 会因为「已被试算清掉」而看不到这条借出。
+      if (!consume) {
+        if (expired || grant.used) continue
+      } else if (expired || grant.used) {
         map.delete(id)
         continue
       }
@@ -116,7 +122,7 @@ export class BorrowStore {
       // read 模式只放行读/搜索族工具：write/edit 是显式写；bash/pwsh 的命令文本命中
       // 可能是 `>`/`Set-Content` 之类的写，read 借出不背书（要 shell 读写请用 read-write）。
       if (grant.mode === 'read' && (isWriteTool(toolName) || isShellTool(toolName))) continue
-      if (grant.kind === 'once') grant.used = true
+      if (grant.kind === 'once' && consume) grant.used = true
       return true
     }
     return false

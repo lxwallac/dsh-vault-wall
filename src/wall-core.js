@@ -2,10 +2,22 @@
  * 墙决策核心 —— 纯函数、零 cordis 依赖，可整链路单测。
  *
  * `decideWall(exec, state)` 复刻 guard 的完整判定：
- *   路径参数命中隔离规则 → hidden/deny 拒绝或借出放行；
+ *   路径参数命中隔离规则 → 按规则 mode 给出 hidden / deny / ask / 借出放行；
  *   命令文本启发式命中保护根 → 同上；
  *   panic 开启 → 一切落在 allowRoots 之外的路径型参数 / 命令绝对 token 被拒。
  * 未知工具与无命中 → allow。
+ *
+ * v0.4 新增两种决策与两个开关：
+ *  - `ask`：规则 `mode: "ask"` 命中，且这次调用**还没被用户同意**——交给审批门处置。
+ *    本函数给出的 `reason` 就是「没人问过」时的 fail-closed 拒绝文案，因此任何只读 `reason`
+ *    的调用方都会自动得到正确行为；审批门则抢在 guard 之前跑完审批并把同意记进台账。
+ *  - `ask-approved`：审批台账里已有这次调用、这个路径的同意记录 → 放行。
+ *  - `state.dryRun`：试算模式，不消耗 `once` 借出、不产生任何副作用。审批门、verify 阶段
+ *    与 `/wall test` 都用它，保证「同一次调用只消耗一次借出」。
+ *  - `state.approved`：审批台账（`ApprovalLedger`），缺席即视为「没问过」。
+ *
+ * 另有风险门槛：`mode: "ask"` 的规则可写 `minRisk`，低于门槛的风险等级直接放行不问人
+ * ——这就是文章里「同一个工具在特定参数组合下变高风险」的动态风险评估落点。
  *
  * 副作用仅一处：`state.borrow.allow(...)`（消耗 once 借出），由调用方注入；
  * `state.borrow` 缺席时无副作用（试算用 `probeWall`，见文件末尾）。
@@ -13,6 +25,8 @@
 
 import { classifyToolArgs, absolutePathTokens } from './classify.js'
 import { textMentions, normalizeAbs, insideOrEqual, ci } from './rules.js'
+import { toolRisk, atLeastRisk } from './risk.js'
+import { askReason, unapprovedDenialReason } from './ask.js'
 
 /** 天然递归聚合、会穿透目标目录子树读取内容的工具族（path 参数为目标目录）。 */
 const RECURSIVE_TOOLS = new Set(['glob', 'grep'])
@@ -86,14 +100,72 @@ export function denialReason(toolName, p, entry) {
   return hiddenReason(toolName, p)
 }
 
+/** 表示「墙拒绝了这个调用」的决策集合。 */
+export const DENIAL_DECISIONS = new Set(['hidden-deny', 'deny', 'ask', 'panic-deny'])
+
+/** 该决策是否属于拒绝（`ask` 也算：没人问过就是拒）。 */
+export function isWallDenial(decision) {
+  return DENIAL_DECISIONS.has(String(decision))
+}
+
+/** 该决策是否属于「经授权放行」（借出或审批通过）——授权范围内的可见性不算泄漏。 */
+export function isAuthorizedDecision(decision) {
+  const value = String(decision)
+  return value === 'borrow-allow' || value === 'ask-approved'
+}
+
+/**
+ * 一条命中规则对一个工具的处置：`hidden-deny` / `deny` / `ask` / `allow`。
+ * 最后一种来自 ask 规则的风险门槛：工具风险低于 `minRisk` 时不值得打扰用户，直接放行。
+ * @param {{mode: string, minRisk?: string, id: string, note?: string}} entry
+ * @param {string} toolName
+ * @returns {'hidden-deny'|'deny'|'ask'|'allow'}
+ */
+export function entryDisposition(entry, toolName) {
+  if (entry.mode === 'ask') {
+    return atLeastRisk(toolRisk(toolName), entry.minRisk ?? 'low') ? 'ask' : 'allow'
+  }
+  return entry.mode === 'deny' ? 'deny' : 'hidden-deny'
+}
+
 /**
  * 借出放行查询：`state.borrow` 允许缺席（试算路径不注入借出存储）。
  * 缺席时一律视为“没有借出”，且不产生任何副作用。
+ * `state.dryRun` 时按试算模式查询：读得到结果，但不消耗 `once`。
  */
 function borrowAllow(state, agent, targetAbs, toolName) {
   const store = state.borrow
   if (store === undefined || store === null) return false
-  return store.allow(agent, targetAbs, toolName)
+  return store.allow(agent, targetAbs, toolName, { consume: state.dryRun !== true })
+}
+
+/** 审批台账查询：`state.approved` 缺席即视为“没问过”。 */
+function approvedAllow(state, exec, targetAbs) {
+  const ledger = state.approved
+  if (ledger === undefined || ledger === null || typeof ledger.covers !== 'function') return false
+  return ledger.covers(exec, targetAbs)
+}
+
+/**
+ * 命中之后的完整处置（路径族与文本族共用）：
+ * 借出 → 审批已同意 → 规则处置（hidden/deny/ask/低风险放行）。
+ * @returns {{decision: string, reason?: string}}
+ */
+function resolveHit(state, exec, toolName, targetAbs, entry) {
+  if (borrowAllow(state, exec.agent, targetAbs, toolName)) return { decision: 'borrow-allow' }
+  if (approvedAllow(state, exec, targetAbs)) return { decision: 'ask-approved' }
+  const disposition = entryDisposition(entry, toolName)
+  if (disposition === 'allow') return { decision: 'allow' }
+  if (disposition === 'ask') {
+    // reason 是「没人问过」时的 fail-closed 拒绝文案；审批门会抢在 guard 之前把同意记进台账。
+    return { decision: 'ask', reason: unapprovedDenialReason({ tool: toolName, path: targetAbs, entry }) }
+  }
+  return { decision: disposition, reason: denialReason(toolName, targetAbs, entry) }
+}
+
+/** 审批弹窗文案（供审批门调用，集中在这里免得两处文案漂移）。 */
+export function askPromptReason(toolName, targetAbs, entry) {
+  return askReason({ tool: toolName, path: targetAbs, risk: toolRisk(toolName), entry })
 }
 
 /** 规范化 panic 白名单（只保留绝对路径）。 */
@@ -125,9 +197,13 @@ function panicDenial(exec, allowRoots) {
 /**
  * 一次工具调用的完整墙决策。
  * @param {{ name: string, arguments: unknown, agent?: object }} exec
- * @param {{ engine: import('./rules.js').RulesEngine | null, panic: boolean, allowRoots: string[], borrow?: import('./borrow.js').BorrowStore | null }} state
+ * @param {{ engine: import('./rules.js').RulesEngine | null, panic: boolean, allowRoots: string[],
+ *   borrow?: import('./borrow.js').BorrowStore | null, approved?: import('./ask.js').ApprovalLedger | null,
+ *   dryRun?: boolean }} state
  *   `borrow` 可缺席：缺席即视为“没有借出”，且不会消耗 `once` 借出。
- * @returns {{ decision: 'allow'|'hidden-deny'|'deny'|'borrow-allow'|'panic-deny', tool: string, path?: string, ruleId?: string, reason?: string }}
+ *   `approved` 可缺席：缺席即视为“没问过”，ask 规则一律 fail-closed。
+ *   `dryRun`：试算，不产生任何副作用（审批门 / verify / `/wall test` 用）。
+ * @returns {{ decision: 'allow'|'hidden-deny'|'deny'|'ask'|'ask-approved'|'borrow-allow'|'panic-deny', tool: string, path?: string, ruleId?: string, reason?: string }}
  */
 export function decideWall(exec, state) {
   const tool = String(exec.name ?? '?')
@@ -155,28 +231,28 @@ export function decideWall(exec, state) {
         }
         continue
       }
-      if (borrowAllow(state, exec.agent, candidate.path, tool)) {
-        return { decision: 'borrow-allow', tool, path: candidate.path, ruleId: entry.id }
-      }
+      const resolution = resolveHit(state, exec, tool, candidate.path, entry)
+      if (resolution.decision === 'borrow-allow') return { decision: 'borrow-allow', tool, path: candidate.path, ruleId: entry.id }
+      if (resolution.decision === 'ask-approved') return { decision: 'ask-approved', tool, path: candidate.path, ruleId: entry.id }
       return {
-        decision: entry.mode === 'deny' ? 'deny' : 'hidden-deny',
+        decision: resolution.decision,
         tool,
         path: candidate.path,
         ruleId: entry.id,
-        reason: denialReason(tool, candidate.path, entry),
+        reason: resolution.reason,
       }
     } else {
       const hit = firstTextHit(engine, tool, candidate.text)
       if (hit !== null) {
-        if (borrowAllow(state, exec.agent, hit.root, tool)) {
-          return { decision: 'borrow-allow', tool, path: hit.root, ruleId: hit.entry.id }
-        }
+        const resolution = resolveHit(state, exec, tool, hit.root, hit.entry)
+        if (resolution.decision === 'borrow-allow') return { decision: 'borrow-allow', tool, path: hit.root, ruleId: hit.entry.id }
+        if (resolution.decision === 'ask-approved') return { decision: 'ask-approved', tool, path: hit.root, ruleId: hit.entry.id }
         return {
-          decision: hit.entry.mode === 'deny' ? 'deny' : 'hidden-deny',
+          decision: resolution.decision,
           tool,
           path: hit.root,
           ruleId: hit.entry.id,
-          reason: denialReason(tool, hit.root, hit.entry),
+          reason: resolution.reason,
         }
       }
       // 命令带递归标记且提到保护区祖先目录：不拦则递归列举/读取会穿透保护区。
@@ -205,5 +281,5 @@ export function decideWall(exec, state) {
  * @param {{ engine: import('./rules.js').RulesEngine | null, panic: boolean, allowRoots: string[] }} state
  */
 export function probeWall(exec, state) {
-  return decideWall(exec, { ...state, borrow: null })
+  return decideWall(exec, { ...state, borrow: null, approved: null, dryRun: true })
 }

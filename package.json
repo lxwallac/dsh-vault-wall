@@ -1,7 +1,7 @@
 {
   "name": "dsh-vault-wall",
-  "version": "0.3.0",
-  "description": "保险区 Vault Wall — 让 DeepSeek Harness 无法感知、无法触碰用户指定敏感路径的隔离墙插件（隔离墙 + 临时借出 + 触碰审计 + 紧急熔断）",
+  "version": "0.4.0",
+  "description": "保险区 Vault Wall — 让 DeepSeek Harness 无法感知、无法触碰用户指定敏感路径的隔离墙插件（隔离墙 + 人在回路审批 + 执行后验证 + 循环纠正 + 可回滚规则）",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -52,7 +52,8 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "test": "node --test tests/rules.test.js tests/classify.test.js tests/borrow.test.js tests/audit.test.js tests/audit-file.test.js tests/wall-core.test.js tests/doc-bridge.test.js tests/console.test.js tests/client-bundle.test.js tests/index-wiring.test.js"
+    "test": "node --test tests/rules.test.js tests/classify.test.js tests/borrow.test.js tests/audit.test.js tests/audit-file.test.js tests/wall-core.test.js tests/risk.test.js tests/ask.test.js tests/verify.test.js tests/correct.test.js tests/metrics.test.js tests/history.test.js tests/report.test.js tests/doc-bridge.test.js tests/console.test.js tests/client-bundle.test.js tests/index-wiring.test.js",
+    "test:local": "node tests/run-local.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
