@@ -8,6 +8,49 @@
 > 使用前请核对与当前安装版本（见 `package.json`）一致；本文档随功能迭代维护。
 > 变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
+<!-- 录好演示 GIF 后：去掉下面两行的注释并把 docs/demo.gif 提交上来（录制脚本见 docs/demo.md）
+<img src="docs/demo.gif" alt="Vault Wall 演示：agent 读私钥得到 not-found，写钱包时弹出审批框" width="820">
+-->
+
+## 它挡 agent 的时候，双方各自看到什么
+
+规则（粘进 设置 → 保险区 Vault Wall → 以 JSON 编辑）：
+
+```jsonc
+{ "version": 1, "rules": [
+  { "id": "keys",       "mode": "hidden", "paths": ["C:\\keys"] },
+  { "id": "archive-ro", "mode": "deny",   "paths": ["C:\\archive"], "tools": ["write", "edit", "bash"] },
+  { "id": "wallet-ask", "mode": "ask",    "paths": ["C:\\wallet"],
+    "minRisk": "medium", "remember": true, "borrowTtlMs": 600000 } ] }
+```
+
+**agent 读私钥 → 假装文件不存在**（连路径名都不透露）
+
+```text
+Error: cannot read "C:\keys\id_ed25519": not found
+```
+
+**agent 删归档目录 → 明确拒绝并点名规则**（`deny` 模式；该目录的读取不受影响）
+
+```text
+Error: [vault-wall] access to "C:\archive" is denied by rule "archive-ro"
+```
+
+**agent 写你的钱包 → 弹窗问你**（`ask` 模式；`read` 是 low 风险，低于 `minRisk` 不打扰你）
+
+```text
+[vault-wall] "C:\wallet\balance.csv" 受规则保护（规则 "wallet-ask"），agent 想用 `write` 触碰它
+（风险：medium／改变内容：写入/原地替换，可逆性一般）。允许这一次吗？
+（同意后 600 秒内不再询问这条路径，同目录其它文件仍会问；要授权整棵目录请用 /wall borrow add <目录>）
+```
+
+点「允许」→ 放行并记一条可查、可撤销的借出（`/wall borrow list`）；点「拒绝」→ 明确拒绝并要求模型别重试；
+**没有审批通道（无人值守）→ 同样拒绝，绝不静默放行**。事后 `/wall report` 会告诉你拦了多少、审批结果如何、
+**有没有被绕过（bypass）**、结果里有没有漏出受保护路径——护栏自己也要能被检查。
+
+> 以上是真实输出（跑的是插件自身的代码路径）。完整对照、试算输出与「怎么录演示 GIF」见
+> **[docs/demo.md](docs/demo.md)**。
+
 ## 功能
 
 - **隐藏模式**：对 agent 装作不存在——读取 / 列出 / 触碰一律 not-found，连路径名都不透露。
